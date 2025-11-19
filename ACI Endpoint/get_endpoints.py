@@ -204,7 +204,8 @@ class ApicEndpointCollector:
                         comp_vm_data = json.load(f)['compVmData']
                     
                     # Link fvRsVm with compVm data
-                    for item in fvrsvm_data.get('imdata', []):
+                    print("Processing endpoint data...")
+                    for item in tqdm(fvrsvm_data.get('imdata', []), desc="Linking VMs", unit="vm"):
                         vm = item.get('fvRsVm', {}).get('attributes', {})
                         tdn = vm.get('tDn')
                         if tdn and tdn in comp_vm_data:
