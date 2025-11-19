@@ -77,6 +77,23 @@ def run_interface_summary():
     
     input("\nPress Enter to return to menu...")
 
+def run_credential_manager():
+    print("\nStarting Credential Manager...")
+    script_path = os.path.join(os.getcwd(), "credential_manager.py")
+    
+    if not os.path.exists(script_path):
+        print(f"Error: Script not found at {script_path}")
+        input("\nPress Enter to continue...")
+        return
+
+    try:
+        # Run the script with the correct working directory
+        subprocess.run([sys.executable, "credential_manager.py"], check=False)
+    except Exception as e:
+        print(f"Error running script: {e}")
+    
+    input("\nPress Enter to return to menu...")
+
 def main():
     while True:
         clear_screen()
@@ -85,10 +102,11 @@ def main():
         print("1. Run ACI Endpoint Collector (Fetch Data & Generate Report)")
         print("2. Run Backup Manager")
         print("3. Run ACI Interface Summary")
-        print("4. View Patch Notes")
-        print("5. Exit")
+        print("4. Manage Credentials")
+        print("5. View Patch Notes")
+        print("6. Exit")
         
-        choice = input("\nEnter your choice (1-5): ")
+        choice = input("\nEnter your choice (1-6): ")
         
         if choice == '1':
             run_aci_collector()
@@ -97,8 +115,10 @@ def main():
         elif choice == '3':
             run_interface_summary()
         elif choice == '4':
-            view_patch_notes()
+            run_credential_manager()
         elif choice == '5':
+            view_patch_notes()
+        elif choice == '6':
             print("\nGoodbye!")
             sys.exit(0)
         else:

@@ -584,9 +584,29 @@ class ACIInterfaceInfo:
             print(f"Failed to save XML file: {str(e)}")
 
 def get_credentials():
-    """Prompt for APIC credentials or load from environment"""
+    """Prompt for APIC credentials or load from environment/profile"""
     
-    # Try to get from environment variables first
+    # Try to get from credential manager first
+    try:
+        # Add project root to sys.path to import credential_manager
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if project_root not in sys.path:
+            sys.path.append(project_root)
+        
+        import credential_manager
+        
+        print("\nChecking for saved profiles...")
+        creds = credential_manager.get_profile()
+        if creds:
+            print("Using selected profile.")
+            return creds[0], "DefaultAuth", creds[1], creds[2]
+            
+    except ImportError:
+        print("Warning: Could not import credential_manager. Falling back to environment/manual.")
+    except Exception as e:
+        print(f"Warning: Error loading profile: {e}")
+
+    # Fallback to environment variables
     env_ip = os.getenv('APIC_IP')
     env_user = os.getenv('APIC_USERNAME')
     env_password = os.getenv('APIC_PASSWORD')

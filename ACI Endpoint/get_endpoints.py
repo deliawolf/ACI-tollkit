@@ -8,21 +8,44 @@ from urllib3.exceptions import InsecureRequestWarning
 import os
 import sys
 import urllib3
+from dotenv import load_dotenv # Added this import as it's used later
 
-# Try to load dotenv, otherwise fallback to manual parsing
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    # Simple fallback to read .env file
-    env_path = os.path.join(os.path.dirname(__file__), '.env')
-    if os.path.exists(env_path):
-        with open(env_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    key, value = line.split('=', 1)
-                    os.environ[key] = value
+# Load environment variables
+load_dotenv()
+
+def get_credentials_from_manager():
+    """Try to get credentials from credential manager"""
+    try:
+        # Add project root to sys.path
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if project_root not in sys.path:
+            sys.path.append(project_root)
+        
+        import credential_manager
+        
+        print("\nChecking for saved profiles...")
+        creds = credential_manager.get_profile()
+        if creds:
+            return creds[0], creds[1], creds[2]
+    except Exception as e:
+        print(f"Warning: Could not load from credential manager: {e}")
+    return None, None, None
+
+# Try to get credentials
+apic_ip, apic_username, apic_password = get_credentials_from_manager()
+
+# Fallback to environment variables
+if not apic_ip:
+    apic_ip = os.getenv('APIC_IP')
+if not apic_username:
+    apic_username = os.getenv('APIC_USERNAME')
+if not apic_password:
+    apic_password = os.getenv('APIC_PASSWORD')
+
+if not all([apic_ip, apic_username, apic_password]):
+    print("Error: APIC credentials not found in Profile or .env file")
+    print("Please use 'Manage Credentials' in main menu or set APIC_IP, APIC_USERNAME, and APIC_PASSWORD in .env")
+    sys.exit(1)
 
 # Suppress only the single warning from urllib3 needed.
 urllib3.disable_warnings(InsecureRequestWarning)
@@ -30,13 +53,11 @@ urllib3.disable_warnings(InsecureRequestWarning)
 class ApicEndpointCollector:
     def __init__(self):
         # APIC connection details
-        self.apic_ip = os.getenv("APIC_IP")
-        self.username = os.getenv("APIC_USERNAME")
-        self.password = os.getenv("APIC_PASSWORD")
+        self.apic_ip = apic_ip
+        self.username = apic_username
+        self.password = apic_password
         
-        if not all([self.apic_ip, self.username, self.password]):
-            print("Error: Missing APIC credentials in .env file.")
-            sys.exit(1)
+        # The credential check is now done globally before class instantiation
         
         self.base_url = f"https://{self.apic_ip}"
         self.token = None

@@ -7,3 +7,4 @@ venv/
 Backup/
 ACI Endpoint/data/raw/
 ACI Endpoint/data/current/
+config/
