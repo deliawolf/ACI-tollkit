@@ -171,9 +171,13 @@ class ApicEndpointCollector:
 
                 # Now process fvRsVm data to link with compVm data
                 try:
-                    with open('fvRsVm.json', 'r') as f:
+                    # Define paths to the files in data/raw/
+                    fvrsvm_path = os.path.join('data', 'raw', 'fvRsVm.json')
+                    compvm_path = os.path.join('data', 'raw', 'compVm.json')
+                    
+                    with open(fvrsvm_path, 'r') as f:
                         fvrsvm_data = json.load(f)
-                    with open('compVm.json', 'r') as f:
+                    with open(compvm_path, 'r') as f:
                         comp_vm_data = json.load(f)['compVmData']
                     
                     # Link fvRsVm with compVm data

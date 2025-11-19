@@ -2,3 +2,5 @@ requests
 pandas
 xlsxwriter
 python-dotenv
+openpyxl
+tabulate

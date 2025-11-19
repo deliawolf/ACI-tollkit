@@ -59,6 +59,24 @@ def run_backup_manager():
     
     input("\nPress Enter to return to menu...")
 
+def run_interface_summary():
+    print("\nStarting ACI Interface Summary...")
+    script_path = os.path.join(os.getcwd(), "ACI Inventory Interface", "get_interface.py")
+    script_dir = os.path.dirname(script_path)
+    
+    if not os.path.exists(script_path):
+        print(f"Error: Script not found at {script_path}")
+        input("\nPress Enter to continue...")
+        return
+
+    try:
+        # Run the script with the correct working directory
+        subprocess.run([sys.executable, "get_interface.py"], cwd=script_dir, check=False)
+    except Exception as e:
+        print(f"Error running script: {e}")
+    
+    input("\nPress Enter to return to menu...")
+
 def main():
     while True:
         clear_screen()
@@ -66,18 +84,21 @@ def main():
         print("\nAvailable Tools:")
         print("1. Run ACI Endpoint Collector (Fetch Data & Generate Report)")
         print("2. Run Backup Manager")
-        print("3. View Patch Notes")
-        print("4. Exit")
+        print("3. Run ACI Interface Summary")
+        print("4. View Patch Notes")
+        print("5. Exit")
         
-        choice = input("\nEnter your choice (1-4): ")
+        choice = input("\nEnter your choice (1-5): ")
         
         if choice == '1':
             run_aci_collector()
         elif choice == '2':
             run_backup_manager()
         elif choice == '3':
-            view_patch_notes()
+            run_interface_summary()
         elif choice == '4':
+            view_patch_notes()
+        elif choice == '5':
             print("\nGoodbye!")
             sys.exit(0)
         else:
