@@ -13,6 +13,12 @@ import getpass
 import re
 import argparse
 import time
+import os
+from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Load environment variables
+load_dotenv()
 
 # Disable SSL warnings
 urllib3.disable_warnings(InsecureRequestWarning)
@@ -346,6 +352,28 @@ class ACIInterfaceInfo:
         
         return {'operSt': 'down', 'operStQual': '', 'lastLinkStChg': ''}
 
+    def _fetch_interface_details(self, dn, transceiver_lookup):
+        """Fetch all details for a single interface (for parallel processing)"""
+        try:
+            # Get physical interface details
+            phys_details = self.get_physical_details(dn)
+            
+            # Get transceiver info for this interface
+            transceiver = transceiver_lookup.get(dn, {})
+            
+            return {
+                'dn': dn,
+                'phys_details': phys_details,
+                'transceiver': transceiver
+            }
+        except Exception as e:
+            self.debug_print(f"Error fetching details for {dn}: {str(e)}")
+            return {
+                'dn': dn,
+                'phys_details': {'operSt': 'down', 'operStQual': '', 'lastLinkStChg': ''},
+                'transceiver': {}
+            }
+
     def to_xml(self):
         """Convert interface information to XML format"""
         root = ET.Element("InterfaceInformation")
@@ -413,7 +441,12 @@ class ACIInterfaceInfo:
 
         # Get current timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        xml_filename = f"{filename}_{timestamp}.xml"
+        
+        # Ensure data directory exists
+        data_dir = os.path.join('data')
+        os.makedirs(data_dir, exist_ok=True)
+        
+        xml_filename = os.path.join(data_dir, f"{filename}_{timestamp}.xml")
         
         # Initialize table headers and data
         headers = ["Node", "Interface", "Description", "Admin State", "Switching State", "Oper State", "Oper Reason", "Speed", "Layer", "Usage", "MTU", "Hostname", "Node Model", "Node Role", "Type", "Serial", "Vendor"]
@@ -421,21 +454,53 @@ class ACIInterfaceInfo:
         
         if interface_data:
             print(f"\nFound {len(interface_data)} interface entries")
+            print("Collecting interface details and transceiver info...")
+            print("Using parallel processing for faster execution...")
+            
+            # Prepare list of DNs to process
+            dns_to_process = []
             for item in interface_data:
                 dn = item.get('dn', '')
+                pod, node, interface = self.parse_dn(dn)
+                # Only process physical ethernet interfaces
+                if interface and interface.startswith('eth'):
+                    dns_to_process.append((dn, item))
+            
+            print(f"Processing {len(dns_to_process)} ethernet interfaces in parallel...")
+            
+            # Process interfaces in parallel using ThreadPoolExecutor
+            details_map = {}
+            with ThreadPoolExecutor(max_workers=20) as executor:
+                # Submit all tasks
+                future_to_dn = {
+                    executor.submit(self._fetch_interface_details, dn, transceiver_lookup): dn 
+                    for dn, _ in dns_to_process
+                }
                 
-                # Get physical interface details
-                phys_details = self.get_physical_details(dn)
+                # Collect results as they complete
+                completed = 0
+                for future in as_completed(future_to_dn):
+                    result = future.result()
+                    details_map[result['dn']] = result
+                    completed += 1
+                    
+                    # Show progress every 100 interfaces
+                    if completed % 100 == 0:
+                        print(f"  Processed {completed}/{len(dns_to_process)} interfaces...")
+            
+            print(f"  Completed processing all {len(dns_to_process)} interfaces!")
+            
+            # Now build the interface info and table data
+            for dn, item in dns_to_process:
+                details = details_map.get(dn)
+                if not details:
+                    continue
                 
-                # Get transceiver info for this interface
-                transceiver = transceiver_lookup.get(dn, {})
+                phys_details = details['phys_details']
+                transceiver = details['transceiver']
                 
                 # Parse DN for pod/node/interface
                 pod, node, interface = self.parse_dn(dn)
-                
-                # Skip if not a physical interface
-                if not interface or not interface.startswith('eth'):
-                    continue
                         
                 # Get admin and switching states
                 admin_state = item.get('adminSt', 'down').lower()
@@ -446,10 +511,10 @@ class ACIInterfaceInfo:
 
                 # Add additional state info if operationally down
                 if phys_details['operSt'] == 'down':
-                    print(f"\nInterface {interface} on Node-{node} is operationally down:")
-                    print(f"  Operational State: {phys_details['operSt']}")
-                    print(f"  Reason: {phys_details['operStQual']}")
-                    print(f"  Last State Change: {phys_details['lastLinkStChg']}")
+                    self.debug_print(f"\nInterface {interface} on Node-{node} is operationally down:")
+                    self.debug_print(f"  Operational State: {phys_details['operSt']}")
+                    self.debug_print(f"  Reason: {phys_details['operStQual']}")
+                    self.debug_print(f"  Last State Change: {phys_details['lastLinkStChg']}")
                     
                 # Create interface info
                 interface_info = {
@@ -519,7 +584,20 @@ class ACIInterfaceInfo:
             print(f"Failed to save XML file: {str(e)}")
 
 def get_credentials():
-    """Prompt for APIC credentials"""
+    """Prompt for APIC credentials or load from environment"""
+    
+    # Try to get from environment variables first
+    env_ip = os.getenv('APIC_IP')
+    env_user = os.getenv('APIC_USERNAME')
+    env_password = os.getenv('APIC_PASSWORD')
+    
+    if env_ip and env_user and env_password:
+        print("Using credentials from environment variables")
+        # Ensure URL starts with https://
+        if not env_ip.startswith("https://"):
+            env_ip = f"https://{env_ip}"
+        return env_ip, "DefaultAuth", env_user, env_password
+
     print("\nEnter APIC connection details:")
     while True:
         apic = input("APIC IP/hostname [https://172.24.207.2]: ").strip()
