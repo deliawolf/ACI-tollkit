@@ -61,7 +61,14 @@ class ApicEndpointCollector:
         
         # The credential check is now done globally before class instantiation
         
-        self.base_url = f"https://{self.apic_ip}"
+        # Handle URL construction safely
+        if self.apic_ip.startswith("https://"):
+            self.base_url = self.apic_ip.rstrip('/')
+        elif self.apic_ip.startswith("http://"):
+             self.base_url = self.apic_ip.rstrip('/')
+        else:
+            self.base_url = f"https://{self.apic_ip}"
+            
         self.token = None
         self.session = requests.Session()
         self.session.verify = False
