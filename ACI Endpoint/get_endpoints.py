@@ -5,9 +5,11 @@ import json
 import concurrent.futures
 import time
 from urllib3.exceptions import InsecureRequestWarning
+import csv
 import os
 import sys
 import urllib3
+from tqdm import tqdm
 from dotenv import load_dotenv # Added this import as it's used later
 
 # Load environment variables

@@ -4,3 +4,4 @@ xlsxwriter
 python-dotenv
 openpyxl
 tabulate
+tqdm

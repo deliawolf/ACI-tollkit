@@ -16,6 +16,7 @@ import time
 import os
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 # Load environment variables
 load_dotenv()
@@ -477,16 +478,10 @@ class ACIInterfaceInfo:
                     for dn, _ in dns_to_process
                 }
                 
-                # Collect results as they complete
-                completed = 0
-                for future in as_completed(future_to_dn):
+                # Collect results as they complete with progress bar
+                for future in tqdm(as_completed(future_to_dn), total=len(dns_to_process), desc="Fetching Details", unit="iface"):
                     result = future.result()
                     details_map[result['dn']] = result
-                    completed += 1
-                    
-                    # Show progress every 100 interfaces
-                    if completed % 100 == 0:
-                        print(f"  Processed {completed}/{len(dns_to_process)} interfaces...")
             
             print(f"  Completed processing all {len(dns_to_process)} interfaces!")
             
