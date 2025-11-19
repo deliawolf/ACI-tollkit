@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.DS_Store
+Backup/
+ACI Endpoint/data/raw/
+ACI Endpoint/data/current/
