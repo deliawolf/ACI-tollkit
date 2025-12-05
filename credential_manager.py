@@ -113,7 +113,30 @@ def load_profiles() -> List[Dict[str, Any]]:
     
     try:
         with open(PROFILES_FILE, 'r') as f:
-            return json.load(f)
+            data = json.load(f)
+            
+            # Handle legacy dictionary format
+            if isinstance(data, dict):
+                normalized_profiles = []
+                for name, profile_data in data.items():
+                    # Handle key mismatch (ip vs apic_ip)
+                    if 'ip' in profile_data:
+                        profile_data['apic_ip'] = profile_data.pop('ip')
+                    # Preserve the key as 'name' if not present
+                    if 'name' not in profile_data:
+                        profile_data['name'] = name
+                    normalized_profiles.append(profile_data)
+                return normalized_profiles
+            
+            # Handle list format
+            elif isinstance(data, list):
+                # Ensure compatibility for items in list
+                for p in data:
+                    if 'ip' in p and 'apic_ip' not in p:
+                        p['apic_ip'] = p.pop('ip')
+                return data
+                
+            return []
     except (json.JSONDecodeError, IOError):
         return []
 

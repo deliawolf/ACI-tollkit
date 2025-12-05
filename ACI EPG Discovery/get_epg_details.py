@@ -6,6 +6,7 @@ import getpass
 import os
 import sys
 import argparse
+import time
 
 # Import logger
 try:
@@ -35,7 +36,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def login_apic(apic_ip, username, password):
     """Logs into the APIC and returns the session."""
-    url = f"https://{apic_ip}/api/aaaLogin.json"
+    base_ip = apic_ip.replace("https://", "").replace("http://", "").rstrip("/")
+    url = f"https://{base_ip}/api/aaaLogin.json"
     payload = {
         "aaaUser": {
             "attributes": {
@@ -56,15 +58,41 @@ def login_apic(apic_ip, username, password):
         logger.error(f"Login failed: {e}", exc_info=True)
         return None
 
-def get_epgs_for_interface(session, apic_ip, node, interface):
+def get_epgs_for_interface(session, apic_ip, node, interface, username=None, password=None):
     """Queries the APIC for EPGs on a specific interface."""
     # Format interface for URL (e.g., eth1/10 -> eth1/10, but in URL it is usually eth1/10 inside brackets)
     # The user example: sys/phys-[eth1/43]
     
-    url = f"https://{apic_ip}/api/node/mo/topology/pod-1/node-{node}/sys/phys-[{interface}].xml?rsp-subtree-include=full-deployment&target-node=all&target-path=l1EthIfToEPg"
+    # Ensure IP doesn't have protocol header as we add it manually
+    base_ip = apic_ip.replace("https://", "").replace("http://", "").rstrip("/")
+    url = f"https://{base_ip}/api/node/mo/topology/pod-1/node-{node}/sys/phys-[{interface}].xml?rsp-subtree-include=full-deployment&target-node=all&target-path=l1EthIfToEPg"
     
     try:
         response = session.get(url, timeout=10)
+        
+        # Handle Token Expiry (403)
+        if response.status_code == 403 and username and password:
+            logger.info("Session expired (403). Attempting to re-authenticate...")
+            new_session = login_apic(apic_ip, username, password)
+            if new_session:
+                # Update existing session with new token
+                session.headers.update(new_session.headers) 
+                
+                # Critical: Clear old cookies and update with new ones to prevent conflict
+                session.cookies.clear()
+                session.cookies.update(new_session.cookies)
+                
+                # Ensure APIC-Cookie is set in cookies as well (APIC often prioritizes cookies)
+                new_token = new_session.headers.get('APIC-Cookie')
+                if new_token:
+                    session.cookies.set('APIC-Cookie', new_token)
+
+                # Retry request
+                logger.info("Re-authentication successful. Retrying request...")
+                response = session.get(url, timeout=10)
+            else:
+                 logger.error("Re-authentication failed.")
+
         response.raise_for_status()
         return response.text
     except Exception as e:
@@ -108,17 +136,41 @@ def parse_epgs(xml_content):
 
 
 
-def get_epg_vlan(session, apic_ip, epg_dn, node, interface):
+def get_epg_vlan(session, apic_ip, epg_dn, node, interface, username=None, password=None):
     """
     Queries the EPG for its fvRsPathAtt children and finds the VLAN for the given node/interface.
     Returns (vlan, path_type, path_dn, domains_str)
     """
     # Query for both static paths (fvRsPathAtt) and VMM domains (fvRsDomAtt) using JSON
     # Explicitly ask for these classes and increase page size to ensure we get all paths
-    url = f"https://{apic_ip}/api/node/mo/{epg_dn}.json?query-target=children&target-subtree-class=fvRsPathAtt,fvRsDomAtt&page-size=10000"
+    
+    base_ip = apic_ip.replace("https://", "").replace("http://", "").rstrip("/")
+    url = f"https://{base_ip}/api/node/mo/{epg_dn}.json?query-target=children&target-subtree-class=fvRsPathAtt,fvRsDomAtt&page-size=10000"
     
     try:
         response = session.get(url, timeout=10)
+
+        # Handle Token Expiry (403)
+        if response.status_code == 403 and username and password:
+            logger.info("Session expired (403). Attempting to re-authenticate...")
+            new_session = login_apic(apic_ip, username, password)
+            if new_session:
+                # Update existing session with new token
+                session.headers.update(new_session.headers) 
+                
+                # Critical: Clear old cookies and update with new ones to prevent conflict
+                session.cookies.clear()
+                session.cookies.update(new_session.cookies)
+                
+                # Ensure APIC-Cookie is set in cookies as well (APIC often prioritizes cookies)
+                new_token = new_session.headers.get('APIC-Cookie')
+                if new_token:
+                    session.cookies.set('APIC-Cookie', new_token)
+                
+                # Retry request
+                logger.info("Re-authentication successful. Retrying request...")
+                response = session.get(url, timeout=10)
+
         response.raise_for_status()
         data = response.json()
         
@@ -251,7 +303,8 @@ def get_epg_vlan(session, apic_ip, epg_dn, node, interface):
             
             try:
                 # Query fvIfConn directly
-                conn_url = f"https://{apic_ip}/api/node/mo/uni/epp/fv-[{epg_dn}]/node-{node}.json?query-target=subtree&target-subtree-class=fvIfConn"
+                base_ip = apic_ip.replace("https://", "").replace("http://", "").rstrip("/")
+                conn_url = f"https://{base_ip}/api/node/mo/uni/epp/fv-[{epg_dn}]/node-{node}.json?query-target=subtree&target-subtree-class=fvIfConn"
 
                 conn_resp = session.get(conn_url, timeout=10)
                 conn_resp.raise_for_status()
@@ -320,7 +373,7 @@ def get_credentials():
         
     return apic_ip, username, password
 
-def run(session, apic_ip, input_file='input_interfaces.xlsx', output_file='output_epgs.xlsx'):
+def run(session, apic_ip, input_file='input_interfaces.xlsx', output_file='output_epgs.xlsx', username=None, password=None):
     """Entry point for main.py"""
     
     # Read input
@@ -346,7 +399,7 @@ def run(session, apic_ip, input_file='input_interfaces.xlsx', output_file='outpu
         
         logger.info(f"Checking Node {node} Interface {interface}...")
         
-        xml_content = get_epgs_for_interface(session, apic_ip, node, interface)
+        xml_content = get_epgs_for_interface(session, apic_ip, node, interface, username, password)
         
         if xml_content:
             epgs = parse_epgs(xml_content)
@@ -357,7 +410,7 @@ def run(session, apic_ip, input_file='input_interfaces.xlsx', output_file='outpu
                     epg['Interface'] = interface
                     
                     # Query Path Details (VLAN, Type, DN)
-                    vlan, path_type, path_dn, domains = get_epg_vlan(session, apic_ip, epg['DN'], node, interface)
+                    vlan, path_type, path_dn, domains = get_epg_vlan(session, apic_ip, epg['DN'], node, interface, username, password)
                     epg['VLAN'] = vlan
                     epg['PathType'] = path_type
                     epg['PathDN'] = path_dn

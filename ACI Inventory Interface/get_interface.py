@@ -45,7 +45,11 @@ class ACIInterfaceInfo:
         
         if session:
             self.session = session
+            # Check for token in cookies first, then headers
             self.token = session.cookies.get("APIC-Cookie")
+            if not self.token:
+                self.token = session.headers.get("APIC-Cookie")
+                
             self.username = None
             self.password = None
             # Set a default refresh timeout far in the future or handle it via main.py
@@ -76,7 +80,8 @@ class ACIInterfaceInfo:
         if not self.token or not self.refresh_timeout:
             if self.username and self.password:
                 return self.login()
-            return False # Cannot refresh without credentials
+            # If we are using session auth without credentials, we just rely on the session
+            return True 
             
         current_time = time.time()
         if current_time >= self.refresh_timeout - 60:  # Refresh 60 seconds before timeout
@@ -181,13 +186,14 @@ class ACIInterfaceInfo:
         """Make a request to APIC with automatic token refresh"""
         # Try to refresh token if needed
         if not self._refresh_token():
-            return None
+            # If we can't refresh (no creds), we proceed anyway hoping session is valid
+            pass
             
         try:
             response = self.session.request(method, url, **kwargs)
             if response.status_code == 403:  # Token might have expired
                 self.debug_print("Got 403, trying to refresh token...")
-                if self._refresh_token():  # Try refresh and retry request
+                if self._refresh_token() and self.username:  # Try refresh and retry request ONLY if we have creds
                     response = self.session.request(method, url, **kwargs)
             return response
         except Exception as e:
@@ -725,9 +731,9 @@ def main():
     # Save interface info
     aci.save_interface_info(args.filename)
 
-def run(session, apic_url):
+def run(session, apic_url, username=None, password=None):
     """Entry point for main.py"""
-    aci = ACIInterfaceInfo(apic_url, session=session)
+    aci = ACIInterfaceInfo(apic_url, session=session, username=username, password=password)
     # We assume session is already logged in
     aci.save_interface_info("interface_info")
 

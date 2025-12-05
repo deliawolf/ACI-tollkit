@@ -44,7 +44,11 @@ class ApicEndpointCollector:
 
         if session:
             self.session = session
+            # Check for token in cookies first, then headers
             self.token = session.cookies.get("APIC-Cookie")
+            if not self.token:
+                self.token = session.headers.get("APIC-Cookie")
+                
             self.username = None
             self.password = None
         else:
@@ -54,8 +58,6 @@ class ApicEndpointCollector:
             self.session.verify = False
             self.token = None
 
-    def get_token(self):
-        """Login to APIC and get authentication token"""
     def get_token(self):
         """Login to APIC and get authentication token"""
         if self.token:
@@ -107,6 +109,14 @@ class ApicEndpointCollector:
             url = f"{self.base_url}/api/class/{class_name}.json"
         try:
             response = self.session.get(url)
+            
+            # Handle Token Expiry
+            if response.status_code == 403:
+                logger.info(f"Token expired while fetching {class_name}. Refreshing...")
+                if self.get_token():
+                    # Retry
+                    response = self.session.get(url)
+            
             response.raise_for_status()
             
             # Get the raw text and handle potential control characters
@@ -233,9 +243,9 @@ class ApicEndpointCollector:
         except Exception as e:
             logger.error(f"Error generating report: {e}", exc_info=True)
 
-def run(session, apic_url):
+def run(session, apic_url, username=None, password=None):
     """Entry point for main.py"""
-    collector = ApicEndpointCollector(apic_url, session=session)
+    collector = ApicEndpointCollector(apic_url, session=session, username=username, password=password)
     collector.collect_endpoints()
 
 def get_credentials_from_manager():
