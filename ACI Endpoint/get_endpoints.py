@@ -10,71 +10,57 @@ import os
 import sys
 import urllib3
 from tqdm import tqdm
+from tqdm import tqdm
 from dotenv import load_dotenv # Added this import as it's used later
 
-# Load environment variables
-load_dotenv()
+# Import logger
+try:
+    # Add project root to sys.path to allow importing utils
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if project_root not in sys.path:
+        sys.path.append(project_root)
+    from utils.logger import setup_logger
+    logger = setup_logger("get_endpoints")
+except ImportError:
+    import logging
+    logger = logging.getLogger("get_endpoints")
+    print("Warning: Could not import centralized logger. Using default.")
 
-def get_credentials_from_manager():
-    """Try to get credentials from credential manager"""
-    try:
-        # Add project root to sys.path
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if project_root not in sys.path:
-            sys.path.append(project_root)
-        
-        import credential_manager
-        
-        print("\nChecking for saved profiles...")
-        creds = credential_manager.get_profile()
-        if creds:
-            return creds[0], creds[1], creds[2]
-    except Exception as e:
-        print(f"Warning: Could not load from credential manager: {e}")
-    return None, None, None
+# Global credential loading moved to main()
 
-# Try to get credentials
-apic_ip, apic_username, apic_password = get_credentials_from_manager()
-
-# Fallback to environment variables
-if not apic_ip:
-    apic_ip = os.getenv('APIC_IP')
-if not apic_username:
-    apic_username = os.getenv('APIC_USERNAME')
-if not apic_password:
-    apic_password = os.getenv('APIC_PASSWORD')
-
-if not all([apic_ip, apic_username, apic_password]):
-    print("Error: APIC credentials not found in Profile or .env file")
-    print("Please use 'Manage Credentials' in main menu or set APIC_IP, APIC_USERNAME, and APIC_PASSWORD in .env")
-    sys.exit(1)
 
 # Suppress only the single warning from urllib3 needed.
 urllib3.disable_warnings(InsecureRequestWarning)
 
 class ApicEndpointCollector:
-    def __init__(self):
-        # APIC connection details
-        self.apic_ip = apic_ip
-        self.username = apic_username
-        self.password = apic_password
-        
-        # The credential check is now done globally before class instantiation
-        
+    def __init__(self, apic_url, session=None, username=None, password=None):
         # Handle URL construction safely
-        if self.apic_ip.startswith("https://"):
-            self.base_url = self.apic_ip.rstrip('/')
-        elif self.apic_ip.startswith("http://"):
-             self.base_url = self.apic_ip.rstrip('/')
+        if apic_url.startswith("https://"):
+            self.base_url = apic_url.rstrip('/')
+        elif apic_url.startswith("http://"):
+             self.base_url = apic_url.rstrip('/')
         else:
-            self.base_url = f"https://{self.apic_ip}"
-            
-        self.token = None
-        self.session = requests.Session()
-        self.session.verify = False
+            self.base_url = f"https://{apic_url}"
+
+        if session:
+            self.session = session
+            self.token = session.cookies.get("APIC-Cookie")
+            self.username = None
+            self.password = None
+        else:
+            self.username = username
+            self.password = password
+            self.session = requests.Session()
+            self.session.verify = False
+            self.token = None
 
     def get_token(self):
         """Login to APIC and get authentication token"""
+    def get_token(self):
+        """Login to APIC and get authentication token"""
+        if self.token:
+            return True
+            
         login_url = f"{self.base_url}/api/aaaLogin.json"
         payload = {
             "aaaUser": {
@@ -92,7 +78,7 @@ class ApicEndpointCollector:
             self.session.cookies.set("APIC-Cookie", self.token)
             return True
         except Exception as e:
-            print(f"Failed to get token: {str(e)}")
+            logger.error(f"Failed to get token: {str(e)}", exc_info=True)
             return False
 
     def get_headers(self):
@@ -131,8 +117,8 @@ class ApicEndpointCollector:
             try:
                 return json.loads(text)
             except json.JSONDecodeError as je:
-                print(f"JSON decode error for {class_name}. Error location: line {je.lineno}, column {je.colno}")
-                print(f"Error message: {je.msg}")
+                logger.error(f"JSON decode error for {class_name}. Error location: line {je.lineno}, column {je.colno}")
+                logger.error(f"Error message: {je.msg}")
                 # Try a more lenient parsing approach
                 try:
                     import ast
@@ -140,11 +126,11 @@ class ApicEndpointCollector:
                     text_dict = ast.literal_eval(text)
                     return text_dict
                 except:
-                    print(f"Failed to parse response even with lenient parsing for {class_name}")
+                    logger.error(f"Failed to parse response even with lenient parsing for {class_name}")
                     return None
                 
         except requests.exceptions.RequestException as e:
-            print(f"Error fetching {class_name} data: {e}")
+            logger.error(f"Error fetching {class_name} data: {e}")
             return None
 
     def _save_json(self, data, filename):
@@ -155,7 +141,7 @@ class ApicEndpointCollector:
         filepath = os.path.join(output_dir, filename)
         with open(filepath, 'w') as f:
             json.dump(data, f, indent=2)
-        print(f"Saved data to {filepath}")
+        logger.info(f"Saved data to {filepath}")
 
     def get_endpoints(self):
         """Get endpoint data from APIC"""
@@ -197,7 +183,7 @@ class ApicEndpointCollector:
                                 self._save_json(data, f'{class_name}.json')
                                 
                     except Exception as e:
-                        print(f"Error processing {class_name} data: {e}")
+                        logger.error(f"Error processing {class_name} data: {e}", exc_info=True)
 
                 # Now process fvRsVm data to link with compVm data
                 try:
@@ -211,7 +197,7 @@ class ApicEndpointCollector:
                         comp_vm_data = json.load(f)['compVmData']
                     
                     # Link fvRsVm with compVm data
-                    print("Processing endpoint data...")
+                    logger.info("Processing endpoint data...")
                     for item in tqdm(fvrsvm_data.get('imdata', []), desc="Linking VMs", unit="vm"):
                         vm = item.get('fvRsVm', {}).get('attributes', {})
                         tdn = vm.get('tDn')
@@ -222,10 +208,10 @@ class ApicEndpointCollector:
                     self._save_json(fvrsvm_data, 'fvRsVm.json')
                     
                 except Exception as e:
-                    print(f"Error linking fvRsVm with compVm data: {e}")
+                    logger.error(f"Error linking fvRsVm with compVm data: {e}", exc_info=True)
 
         except Exception as e:
-            print(f"Error in get_endpoints: {e}")
+            logger.error(f"Error in get_endpoints: {e}", exc_info=True)
 
     def collect_endpoints(self):
         """Collect all endpoint data using concurrent API calls"""
@@ -237,18 +223,60 @@ class ApicEndpointCollector:
         self.get_endpoints()
 
         end_time = time.time()
-        print(f"\nTotal execution time: {end_time - start_time:.2f} seconds")
+        logger.info(f"\nTotal execution time: {end_time - start_time:.2f} seconds")
         
         # Generate report
-        print("\nGenerating report...")
+        logger.info("\nGenerating report...")
         try:
             from create_report import create_endpoint_report
             create_endpoint_report()
         except Exception as e:
-            print(f"Error generating report: {e}")
+            logger.error(f"Error generating report: {e}", exc_info=True)
+
+def run(session, apic_url):
+    """Entry point for main.py"""
+    collector = ApicEndpointCollector(apic_url, session=session)
+    collector.collect_endpoints()
+
+def get_credentials_from_manager():
+    """Try to get credentials from credential manager"""
+    try:
+        # Add project root to sys.path
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if project_root not in sys.path:
+            sys.path.append(project_root)
+        
+        import credential_manager
+        
+        logger.info("\nChecking for saved profiles...")
+        creds = credential_manager.get_profile()
+        if creds:
+            return creds[0], creds[1], creds[2]
+    except Exception as e:
+        logger.warning(f"Warning: Could not load from credential manager: {e}")
+    return None, None, None
 
 def main():
-    collector = ApicEndpointCollector()
+    # Load environment variables
+    load_dotenv()
+    
+    # Try to get credentials
+    apic_ip, apic_username, apic_password = get_credentials_from_manager()
+
+    # Fallback to environment variables
+    if not apic_ip:
+        apic_ip = os.getenv('APIC_IP')
+    if not apic_username:
+        apic_username = os.getenv('APIC_USERNAME')
+    if not apic_password:
+        apic_password = os.getenv('APIC_PASSWORD')
+
+    if not all([apic_ip, apic_username, apic_password]):
+        logger.error("Error: APIC credentials not found in Profile or .env file")
+        logger.error("Please use 'Manage Credentials' in main menu or set APIC_IP, APIC_USERNAME, and APIC_PASSWORD in .env")
+        sys.exit(1)
+
+    collector = ApicEndpointCollector(apic_ip, username=apic_username, password=apic_password)
     collector.collect_endpoints()
 
 if __name__ == "__main__":

@@ -18,6 +18,19 @@ from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
+# Import logger
+try:
+    # Add project root to sys.path to allow importing utils
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if project_root not in sys.path:
+        sys.path.append(project_root)
+    from utils.logger import setup_logger
+    logger = setup_logger("get_interface")
+except ImportError:
+    import logging
+    logger = logging.getLogger("get_interface")
+    print("Warning: Could not import centralized logger. Using default.")
+
 # Load environment variables
 load_dotenv()
 
@@ -25,20 +38,26 @@ load_dotenv()
 urllib3.disable_warnings(InsecureRequestWarning)
 
 class ACIInterfaceInfo:
-    def __init__(self, apic_url, username, password):
-        """Initialize connection to APIC
-        Args:
-            apic_url (str): APIC URL (e.g., https://apic)
-            username (str): APIC username
-            password (str): APIC password
-        """
+    def __init__(self, apic_url, session=None, username=None, password=None):
+        """Initialize connection to APIC"""
         self.apic_url = apic_url.rstrip('/')  # Remove trailing slash if present
-        self.username = username
-        self.password = password
-        self.session = requests.Session()
-        self.session.verify = False
-        self.refresh_timeout = None
-        self.token = None
+        
+        if session:
+            self.session = session
+            self.token = session.cookies.get("APIC-Cookie")
+            self.username = None
+            self.password = None
+            # Set a default refresh timeout far in the future or handle it via main.py
+            # For now, we assume main.py handles session validity, but we can keep the refresh logic if needed
+            self.refresh_timeout = time.time() + 600 
+        else:
+            self.username = username
+            self.password = password
+            self.session = requests.Session()
+            self.session.verify = False
+            self.token = None
+            self.refresh_timeout = None
+            
         self.interfaces = []
         self.debug = False  # Initialize debug flag
         
@@ -49,12 +68,14 @@ class ACIInterfaceInfo:
     def debug_print(self, *args, **kwargs):
         """Print only if debug is enabled"""
         if self.debug:
-            print(*args, **kwargs)
+            logger.debug(*args, **kwargs)
 
     def _refresh_token(self):
         """Refresh the authentication token before timeout"""
         if not self.token or not self.refresh_timeout:
-            return self.login()
+            if self.username and self.password:
+                return self.login()
+            return False # Cannot refresh without credentials
             
         current_time = time.time()
         if current_time >= self.refresh_timeout - 60:  # Refresh 60 seconds before timeout
@@ -66,13 +87,13 @@ class ACIInterfaceInfo:
         """Get available authentication domains from APIC"""
         domains_url = f"{self.apic_url}/api/aaaListDomains.json"
         try:
-            print(f"\nGetting authentication domains from: {domains_url}")
+            logger.info(f"\nGetting authentication domains from: {domains_url}")
             response = self.session.get(
                 domains_url,
                 timeout=10
             )
             
-            print(f"Response status code: {response.status_code}")
+            logger.debug(f"Response status code: {response.status_code}")
             if response.status_code == 200:
                 data = response.json()
                 domains = []
@@ -85,15 +106,15 @@ class ACIInterfaceInfo:
                             domains.append({'name': name, 'type': domain_type})
                 return domains
             else:
-                print(f"Error getting domains. Status code: {response.status_code}")
-                print(f"Error Content: {response.text}")
+                logger.error(f"Error getting domains. Status code: {response.status_code}")
+                logger.error(f"Error Content: {response.text}")
                 return None
                 
         except requests.exceptions.RequestException as e:
-            print(f"Failed to get authentication domains: {str(e)}")
+            logger.error(f"Failed to get authentication domains: {str(e)}")
             return None
         except Exception as e:
-            print(f"Unexpected error while getting domains: {str(e)}")
+            logger.error(f"Unexpected error while getting domains: {str(e)}", exc_info=True)
             return None
 
     def login(self, selected_domain="DefaultAuth"):
@@ -104,7 +125,7 @@ class ACIInterfaceInfo:
                 domain_username = self.username  # Don't add domain prefix for DefaultAuth
             else:
                 domain_username = f"apic:{selected_domain}\\{self.username}"
-            print(f"\nLogging in with username: {domain_username}")
+            logger.info(f"\nLogging in with username: {domain_username}")
             
             login_url = f"{self.apic_url}/api/aaaLogin.json"
             payload = {
@@ -137,22 +158,22 @@ class ACIInterfaceInfo:
                 self.session.headers.update({
                     'APIC-Cookie': token
                 })
-                print("Successfully logged in to APIC")
+                logger.info("Successfully logged in to APIC")
                 return True
             else:
                 if response.text:
                     error_data = response.json()
                     error_message = error_data.get('imdata', [{}])[0].get('error', {}).get('attributes', {}).get('text', 'Unknown error')
-                    print(f"Login failed: {error_message}")
+                    logger.error(f"Login failed: {error_message}")
                 else:
-                    print(f"Login failed with status code: {response.status_code}")
+                    logger.error(f"Login failed with status code: {response.status_code}")
                 return False
                 
         except requests.exceptions.RequestException as e:
-            print(f"Network error during login: {str(e)}")
+            logger.error(f"Network error during login: {str(e)}")
             return False
         except Exception as e:
-            print(f"Unexpected error during login: {str(e)}")
+            logger.error(f"Unexpected error during login: {str(e)}", exc_info=True)
             return False
 
     def _make_request(self, method, url, **kwargs):
@@ -169,7 +190,7 @@ class ACIInterfaceInfo:
                     response = self.session.request(method, url, **kwargs)
             return response
         except Exception as e:
-            print(f"Error making request: {str(e)}")
+            logger.error(f"Error making request: {str(e)}")
             return None
 
     def get_interface_info(self):
@@ -324,7 +345,7 @@ class ACIInterfaceInfo:
         
         # Check if DN is in correct format
         if not dn or '/phys-[' not in dn:
-            print(f"Invalid DN format for physical details: {dn}")
+            logger.warning(f"Invalid DN format for physical details: {dn}")
             return {'operSt': 'down', 'operStQual': '', 'lastLinkStChg': ''}
             
         # Ensure DN doesn't already have /phys at the end
@@ -347,9 +368,9 @@ class ACIInterfaceInfo:
                     'lastLinkStChg': phys_if.get('lastLinkStChg', '')
                 }
             else:
-                print(f"No physical interface data found for {phys_dn}")
+                logger.debug(f"No physical interface data found for {phys_dn}")
         except Exception as e:
-            print(f"Error getting physical details for {phys_dn}: {str(e)}")
+            logger.error(f"Error getting physical details for {phys_dn}: {str(e)}")
         
         return {'operSt': 'down', 'operStQual': '', 'lastLinkStChg': ''}
 
@@ -413,7 +434,7 @@ class ACIInterfaceInfo:
         fault_data = self.get_interface_faults()
         
         if not interface_data:
-            print("\nNo interface data received from API")
+            logger.warning("\nNo interface data received from API")
             return
 
         # Create lookup for transceivers by DN
@@ -454,9 +475,9 @@ class ACIInterfaceInfo:
         table_data = []
         
         if interface_data:
-            print(f"\nFound {len(interface_data)} interface entries")
-            print("Collecting interface details and transceiver info...")
-            print("Using parallel processing for faster execution...")
+            logger.info(f"\nFound {len(interface_data)} interface entries")
+            logger.info("Collecting interface details and transceiver info...")
+            logger.info("Using parallel processing for faster execution...")
             
             # Prepare list of DNs to process
             dns_to_process = []
@@ -467,7 +488,7 @@ class ACIInterfaceInfo:
                 if interface and interface.startswith('eth'):
                     dns_to_process.append((dn, item))
             
-            print(f"Processing {len(dns_to_process)} ethernet interfaces in parallel...")
+            logger.info(f"Processing {len(dns_to_process)} ethernet interfaces in parallel...")
             
             # Process interfaces in parallel using ThreadPoolExecutor
             details_map = {}
@@ -483,7 +504,7 @@ class ACIInterfaceInfo:
                     result = future.result()
                     details_map[result['dn']] = result
             
-            print(f"  Completed processing all {len(dns_to_process)} interfaces!")
+            logger.info(f"  Completed processing all {len(dns_to_process)} interfaces!")
             
             # Now build the interface info and table data
             for dn, item in dns_to_process:
@@ -569,14 +590,14 @@ class ACIInterfaceInfo:
             with open(xml_filename, 'w') as f:
                 f.write(pretty_xml)
             
-            print(f"\nSaved interface information to {xml_filename}")
+            logger.info(f"\nSaved interface information to {xml_filename}")
             
             # Display summary table
-            print("\nInterface Summary:")
+            print("\nInterface Summary:") # Keep print for table output
             print(tabulate(table_data, headers=headers, tablefmt="pretty", numalign="left", stralign="left"))
             
         except Exception as e:
-            print(f"Failed to save XML file: {str(e)}")
+            logger.error(f"Failed to save XML file: {str(e)}", exc_info=True)
 
 def get_credentials():
     """Prompt for APIC credentials or load from environment/profile"""
@@ -590,16 +611,16 @@ def get_credentials():
         
         import credential_manager
         
-        print("\nChecking for saved profiles...")
+        logger.info("\nChecking for saved profiles...")
         creds = credential_manager.get_profile()
         if creds:
-            print("Using selected profile.")
+            logger.info("Using selected profile.")
             return creds[0], "DefaultAuth", creds[1], creds[2]
             
     except ImportError:
-        print("Warning: Could not import credential_manager. Falling back to environment/manual.")
+        logger.warning("Warning: Could not import credential_manager. Falling back to environment/manual.")
     except Exception as e:
-        print(f"Warning: Error loading profile: {e}")
+        logger.warning(f"Warning: Error loading profile: {e}")
 
     # Fallback to environment variables
     env_ip = os.getenv('APIC_IP')
@@ -607,13 +628,13 @@ def get_credentials():
     env_password = os.getenv('APIC_PASSWORD')
     
     if env_ip and env_user and env_password:
-        print("Using credentials from environment variables")
+        logger.info("Using credentials from environment variables")
         # Ensure URL starts with https://
         if not env_ip.startswith("https://"):
             env_ip = f"https://{env_ip}"
         return env_ip, "DefaultAuth", env_user, env_password
 
-    print("\nEnter APIC connection details:")
+    logger.info("\nEnter APIC connection details:")
     while True:
         apic = input("APIC IP/hostname [https://172.24.207.2]: ").strip()
         if not apic:
@@ -625,11 +646,11 @@ def get_credentials():
 
         # Create temporary instance to get auth domains
         temp_aci = ACIInterfaceInfo(apic, "", "")
-        print("\nRetrieving authentication domains...")
+        logger.info("\nRetrieving authentication domains...")
         domains = temp_aci.list_auth_domains()
         
         if domains:
-            print("\nAvailable authentication domains:")
+            logger.info("\nAvailable authentication domains:")
             for i, domain in enumerate(domains, 1):
                 print(f"{i}. {domain['name']} ({domain['type']})")
             
@@ -644,7 +665,7 @@ def get_credentials():
                 except ValueError:
                     print("Please enter a number.")
         else:
-            print("Could not retrieve authentication domains. Using default authentication.")
+            logger.warning("Could not retrieve authentication domains. Using default authentication.")
             selected_domain = "DefaultAuth"
 
         max_attempts = 3
@@ -655,7 +676,7 @@ def get_credentials():
                 
             password = getpass.getpass("Password: ")
             if not password:
-                print("Password cannot be empty. Please try again.")
+                logger.warning("Password cannot be empty. Please try again.")
                 continue
 
             # Create a test instance to verify credentials
@@ -665,9 +686,9 @@ def get_credentials():
             
             attempts_left = max_attempts - attempt - 1
             if attempts_left > 0:
-                print(f"\nLogin failed. {attempts_left} attempts remaining. Please try again.")
+                logger.warning(f"\nLogin failed. {attempts_left} attempts remaining. Please try again.")
             else:
-                print("\nMaximum login attempts exceeded. Exiting.")
+                logger.error("\nMaximum login attempts exceeded. Exiting.")
                 sys.exit(1)
 
 def main():
@@ -697,11 +718,17 @@ def main():
     
     # Login to APIC with selected domain
     if not aci.login(selected_domain):
-        print("Failed to login to APIC")
+        logger.error("Failed to login to APIC")
         return
     
     # Save interface info
     aci.save_interface_info(args.filename)
+
+def run(session, apic_url):
+    """Entry point for main.py"""
+    aci = ACIInterfaceInfo(apic_url, session=session)
+    # We assume session is already logged in
+    aci.save_interface_info("interface_info")
 
 if __name__ == "__main__":
     main()

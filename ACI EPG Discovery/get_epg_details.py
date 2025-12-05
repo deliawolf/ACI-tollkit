@@ -7,6 +7,19 @@ import os
 import sys
 import argparse
 
+# Import logger
+try:
+    # Add project root to sys.path to allow importing utils
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if project_root not in sys.path:
+        sys.path.append(project_root)
+    from utils.logger import setup_logger
+    logger = setup_logger("get_epg_details")
+except ImportError:
+    import logging
+    logger = logging.getLogger("get_epg_details")
+    print("Warning: Could not import centralized logger. Using default.")
+
 # Add project root to sys.path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
@@ -21,7 +34,7 @@ except ImportError:
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def login_apic(apic_ip, username, password):
-    """Logs into the APIC and returns the session cookie."""
+    """Logs into the APIC and returns the session."""
     url = f"https://{apic_ip}/api/aaaLogin.json"
     payload = {
         "aaaUser": {
@@ -31,32 +44,31 @@ def login_apic(apic_ip, username, password):
             }
         }
     }
+    session = requests.Session()
+    session.verify = False
     try:
-        response = requests.post(url, json=payload, verify=False, timeout=10)
+        response = session.post(url, json=payload, timeout=10)
         response.raise_for_status()
         token = response.json()['imdata'][0]['aaaLogin']['attributes']['token']
-        return token
+        session.headers.update({'APIC-Cookie': token})
+        return session
     except Exception as e:
-        print(f"Login failed: {e}")
+        logger.error(f"Login failed: {e}", exc_info=True)
         return None
 
-def get_epgs_for_interface(apic_ip, token, node, interface):
+def get_epgs_for_interface(session, apic_ip, node, interface):
     """Queries the APIC for EPGs on a specific interface."""
     # Format interface for URL (e.g., eth1/10 -> eth1/10, but in URL it is usually eth1/10 inside brackets)
     # The user example: sys/phys-[eth1/43]
     
     url = f"https://{apic_ip}/api/node/mo/topology/pod-1/node-{node}/sys/phys-[{interface}].xml?rsp-subtree-include=full-deployment&target-node=all&target-path=l1EthIfToEPg"
     
-    headers = {
-        "Cookie": f"APIC-cookie={token}"
-    }
-    
     try:
-        response = requests.get(url, headers=headers, verify=False, timeout=10)
+        response = session.get(url, timeout=10)
         response.raise_for_status()
         return response.text
     except Exception as e:
-        print(f"Error querying Node {node} Interface {interface}: {e}")
+        logger.error(f"Error querying Node {node} Interface {interface}: {e}")
         return None
 
 def parse_epgs(xml_content):
@@ -91,12 +103,12 @@ def parse_epgs(xml_content):
                     'DN': ctx_dn
                 })
     except Exception as e:
-        print(f"Error parsing XML: {e}")
+        logger.error(f"Error parsing XML: {e}", exc_info=True)
     return epgs
 
 
 
-def get_epg_vlan(apic_ip, token, epg_dn, node, interface):
+def get_epg_vlan(session, apic_ip, epg_dn, node, interface):
     """
     Queries the EPG for its fvRsPathAtt children and finds the VLAN for the given node/interface.
     Returns (vlan, path_type, path_dn, domains_str)
@@ -104,12 +116,9 @@ def get_epg_vlan(apic_ip, token, epg_dn, node, interface):
     # Query for both static paths (fvRsPathAtt) and VMM domains (fvRsDomAtt) using JSON
     # Explicitly ask for these classes and increase page size to ensure we get all paths
     url = f"https://{apic_ip}/api/node/mo/{epg_dn}.json?query-target=children&target-subtree-class=fvRsPathAtt,fvRsDomAtt&page-size=10000"
-    headers = {
-        "Cookie": f"APIC-cookie={token}"
-    }
     
     try:
-        response = requests.get(url, headers=headers, verify=False, timeout=10)
+        response = session.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
         
@@ -244,7 +253,7 @@ def get_epg_vlan(apic_ip, token, epg_dn, node, interface):
                 # Query fvIfConn directly
                 conn_url = f"https://{apic_ip}/api/node/mo/uni/epp/fv-[{epg_dn}]/node-{node}.json?query-target=subtree&target-subtree-class=fvIfConn"
 
-                conn_resp = requests.get(conn_url, headers=headers, verify=False, timeout=10)
+                conn_resp = session.get(conn_url, timeout=10)
                 conn_resp.raise_for_status()
                 conn_data = conn_resp.json()
                 
@@ -277,7 +286,7 @@ def get_epg_vlan(apic_ip, token, epg_dn, node, interface):
                 return "EPP: Interface Not Found in Connections", "VMM Domain", "N/A", domains_str
 
             except Exception as e:
-                print(f"  Error querying Dynamic VLAN: {e}")
+                logger.debug(f"  Error querying Dynamic VLAN: {e}")
                 return f"EPP Error: {str(e)}", "VMM Domain", "N/A", domains_str
 
         # 3. If neither, check if we had partial matches
@@ -288,20 +297,20 @@ def get_epg_vlan(apic_ip, token, epg_dn, node, interface):
         return "Not Found", "None", "No matching path", domains_str
 
     except Exception as e:
-        print(f"Error querying VLAN for {epg_dn}: {e}")
+        logger.error(f"Error querying VLAN for {epg_dn}: {e}")
         return "Error", "Error", str(e), ""
 
 def get_credentials():
     """Get credentials from manager or environment"""
     # Try credential manager first
     if credential_manager:
-        print("\nChecking for saved profiles...")
+        logger.info("\nChecking for saved profiles...")
         creds = credential_manager.get_profile()
         if creds:
             return creds[0], creds[1], creds[2]
 
     # Fallback to manual input
-    print("\nEnter APIC connection details:")
+    logger.info("\nEnter APIC connection details:")
     apic_ip = input("APIC IP/hostname: ").strip()
     username = input("Username: ").strip()
     password = getpass.getpass("Password: ")
@@ -311,36 +320,21 @@ def get_credentials():
         
     return apic_ip, username, password
 
-def main():
-    parser = argparse.ArgumentParser(description='ACI EPG Discovery Tool')
-    parser.add_argument('-i', '--input', default='input_interfaces.xlsx', help='Input Excel file')
-    parser.add_argument('-o', '--output', default='output_epgs.xlsx', help='Output Excel file')
-    args = parser.parse_args()
-
-    print("ACI EPG Discovery Tool")
-    
-    # Get credentials
-    apic_ip, username, password = get_credentials()
-    if not all([apic_ip, username, password]):
-        print("Error: Missing credentials")
-        return
-
-    # Login
-    print(f"\nLogging in to {apic_ip}...")
-    token = login_apic(apic_ip, username, password)
-    if not token:
-        return
-
-    print("Login successful.")
+def run(session, apic_ip, input_file='input_interfaces.xlsx', output_file='output_epgs.xlsx'):
+    """Entry point for main.py"""
     
     # Read input
     try:
-        df_input = pd.read_excel(args.input)
+        # Handle relative paths if run from main.py
+        if not os.path.exists(input_file):
+            # Try looking in the script directory
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            input_file = os.path.join(script_dir, os.path.basename(input_file))
+            
+        df_input = pd.read_excel(input_file)
     except FileNotFoundError:
-        print(f"Error: {args.input} not found.")
+        logger.error(f"Error: {input_file} not found.")
         return
-
-
 
     all_results = []
 
@@ -350,20 +344,20 @@ def main():
         node = row['Node']
         interface = row['Interface']
         
-        print(f"Checking Node {node} Interface {interface}...")
+        logger.info(f"Checking Node {node} Interface {interface}...")
         
-        xml_content = get_epgs_for_interface(apic_ip, token, node, interface)
+        xml_content = get_epgs_for_interface(session, apic_ip, node, interface)
         
         if xml_content:
             epgs = parse_epgs(xml_content)
             if epgs:
-                print(f"  Found {len(epgs)} EPGs. Querying Path Details...")
+                logger.info(f"  Found {len(epgs)} EPGs. Querying Path Details...")
                 for epg in epgs:
                     epg['Node'] = node
                     epg['Interface'] = interface
                     
                     # Query Path Details (VLAN, Type, DN)
-                    vlan, path_type, path_dn, domains = get_epg_vlan(apic_ip, token, epg['DN'], node, interface)
+                    vlan, path_type, path_dn, domains = get_epg_vlan(session, apic_ip, epg['DN'], node, interface)
                     epg['VLAN'] = vlan
                     epg['PathType'] = path_type
                     epg['PathDN'] = path_dn
@@ -371,7 +365,7 @@ def main():
                     
                     all_results.append(epg)
             else:
-                print(f"  No EPGs found or parsing error.")
+                logger.info(f"  No EPGs found or parsing error.")
         
         # Rate limiting to be safe
         time.sleep(0.1)
@@ -387,10 +381,34 @@ def main():
                 df_output[col] = ""
                 
         df_output = df_output[cols]
-        df_output.to_excel(args.output, index=False)
-        print(f"Results saved to {args.output}")
+        df_output.to_excel(output_file, index=False)
+        logger.info(f"Results saved to {output_file}")
     else:
-        print("No results to save.")
+        logger.info("No results to save.")
+
+def main():
+    parser = argparse.ArgumentParser(description='ACI EPG Discovery Tool')
+    parser.add_argument('-i', '--input', default='input_interfaces.xlsx', help='Input Excel file')
+    parser.add_argument('-o', '--output', default='output_epgs.xlsx', help='Output Excel file')
+    args = parser.parse_args()
+
+    print("ACI EPG Discovery Tool")
+    
+    # Get credentials
+    apic_ip, username, password = get_credentials()
+    if not all([apic_ip, username, password]):
+        logger.error("Error: Missing credentials")
+        return
+
+    # Login
+    logger.info(f"\nLogging in to {apic_ip}...")
+    session = login_apic(apic_ip, username, password)
+    if not session:
+        return
+
+    logger.info("Login successful.")
+    
+    run(session, apic_ip, args.input, args.output)
 
 if __name__ == "__main__":
     main()

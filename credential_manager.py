@@ -1,6 +1,7 @@
 import json
 import os
 import getpass
+import base64
 from tabulate import tabulate
 
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config')
@@ -20,8 +21,25 @@ def load_profiles():
     except json.JSONDecodeError:
         return {}
 
+def encode_password(password):
+    """Obfuscate password using base64"""
+    return base64.b64encode(password.encode()).decode()
+
+def decode_password(encoded_password):
+    """De-obfuscate password"""
+    try:
+        return base64.b64decode(encoded_password.encode()).decode()
+    except Exception:
+        return encoded_password  # Return as-is if decoding fails (legacy support)
+
 def save_profiles(profiles):
     ensure_config_dir()
+    # Create a deep copy to avoid modifying the runtime dict if we were caching it
+    # But here we just write to file.
+    # We assume the 'profiles' passed in ALREADY has encoded passwords if they came from load_profiles
+    # BUT if we just added a new one, it might be plain text.
+    # Actually, let's handle encoding at the "add" and "get" boundaries to be cleaner.
+    
     with open(PROFILES_FILE, 'w') as f:
         json.dump(profiles, f, indent=4)
 
@@ -49,7 +67,7 @@ def add_profile():
     profiles[name] = {
         'ip': ip,
         'username': username,
-        'password': password
+        'password': encode_password(password)  # Store encoded
     }
     save_profiles(profiles)
     print(f"Profile '{name}' saved successfully.")
@@ -98,7 +116,9 @@ def get_profile():
             if 0 <= choice_idx < len(profile_names):
                 selected_name = profile_names[choice_idx]
                 data = profiles[selected_name]
-                return data['ip'], data['username'], data['password']
+                # Decode password before returning
+                decoded_pw = decode_password(data['password'])
+                return data['ip'], data['username'], decoded_pw
             elif choice_idx == len(profile_names):
                 # Manual entry
                 return None
