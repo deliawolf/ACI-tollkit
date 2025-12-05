@@ -1,10 +1,38 @@
+# Python
 __pycache__/
 *.pyc
 .venv/
 venv/
 .env
+
+# OS
 .DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Backups
 Backup/
-ACI Endpoint/data/raw/
-ACI Endpoint/data/current/
+
+# Configuration
 config/
+
+# Data & Logs
+data/
+**/data/
+logs/
+
+# Generated Reports
+*.xlsx
+!input_interfaces.xlsx
+*.xml
+*.csv
+*.json
+!PATCH_NOTES.md
+!README.md
+!task.md
+!implementation_plan.md
+!walkthrough.md
+!codebase_analysis.md
+

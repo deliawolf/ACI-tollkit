@@ -94,6 +94,26 @@ def run_credential_manager():
     
     input("\nPress Enter to return to menu...")
 
+
+
+def run_epg_discovery():
+    print("\nStarting ACI EPG Discovery...")
+    script_path = os.path.join(os.getcwd(), "ACI EPG Discovery", "get_epg_details.py")
+    script_dir = os.path.dirname(script_path)
+    
+    if not os.path.exists(script_path):
+        print(f"Error: Script not found at {script_path}")
+        input("\nPress Enter to continue...")
+        return
+
+    try:
+        # Run the script with the correct working directory
+        subprocess.run([sys.executable, "get_epg_details.py"], cwd=script_dir, check=False)
+    except Exception as e:
+        print(f"Error running script: {e}")
+    
+    input("\nPress Enter to return to menu...")
+
 def main():
     while True:
         clear_screen()
@@ -102,11 +122,12 @@ def main():
         print("1. Run ACI Endpoint Collector (Fetch Data & Generate Report)")
         print("2. Run Backup Manager")
         print("3. Run ACI Interface Summary")
-        print("4. Manage Credentials")
-        print("5. View Patch Notes")
-        print("6. Exit")
+        print("4. Run ACI EPG Discovery")
+        print("5. Manage Credentials")
+        print("6. View Patch Notes")
+        print("7. Exit")
         
-        choice = input("\nEnter your choice (1-6): ")
+        choice = input("\nEnter your choice (1-7): ")
         
         if choice == '1':
             run_aci_collector()
@@ -115,10 +136,12 @@ def main():
         elif choice == '3':
             run_interface_summary()
         elif choice == '4':
-            run_credential_manager()
+            run_epg_discovery()
         elif choice == '5':
-            view_patch_notes()
+            run_credential_manager()
         elif choice == '6':
+            view_patch_notes()
+        elif choice == '7':
             print("\nGoodbye!")
             sys.exit(0)
         else:
