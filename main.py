@@ -6,6 +6,15 @@ import subprocess
 import requests
 import getpass
 import urllib3
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich import print as rprint
+from rich.prompt import Prompt, IntPrompt
+from typing import Optional, Tuple
+
+# Initialize Rich Console
+console = Console()
 from urllib3.exceptions import InsecureRequestWarning
 
 # Disable SSL warnings
@@ -35,46 +44,57 @@ logger = setup_logger("main")
 
 VERSION = "v1.2.0"
 
-def clear_screen():
+def clear_screen() -> None:
+
     os.system('cls' if os.name == 'nt' else 'clear')
 
-def print_header():
-    print("=" * 40)
-    print(f"      ACI Toolkit - Main Menu ({VERSION})")
-    print("=" * 40)
+def print_header() -> None:
 
-def view_patch_notes():
+    clear_screen()
+    console.print(Panel.fit(
+        f"[bold cyan]ACI Toolkit[/bold cyan] [dim]{VERSION}[/dim]\n[italic]Automated ACI Management & Reporting[/italic]",
+        border_style="cyan",
+        title="Welcome",
+        subtitle="Developed by Deliawolf"
+    ))
+
+def view_patch_notes() -> None:
+
     clear_screen()
     try:
         with open("PATCH_NOTES.md", "r") as f:
-            print(f.read())
+            console.print(Panel(f.read(), title="Patch Notes", border_style="blue"))
     except FileNotFoundError:
-        print("Error: PATCH_NOTES.md not found.")
+        console.print("[red]Error: PATCH_NOTES.md not found.[/red]")
     
-    input("\nPress Enter to return to menu...")
+    console.input("\n[dim]Press Enter to return to menu...[/dim]")
 
-def login_to_apic():
+def login_to_apic() -> Tuple[Optional[requests.Session], Optional[str]]:
+
     """Handle APIC login and return session and URL"""
-    logger.info("\n--- APIC Login ---")
+    console.print("\n[bold blue]--- APIC Login ---[/bold blue]")
     
     # Try to get credentials from manager
     try:
         creds = credential_manager.get_profile()
         if creds:
             apic_ip, username, password = creds
-            logger.info(f"Using profile for {apic_ip}")
+            console.print(f"[green]Using profile for {apic_ip}[/green]")
         else:
             raise ValueError("No profile selected")
     except Exception:
         # Manual entry
-        logger.info("Enter APIC connection details:")
-        apic_ip = input("APIC IP/hostname [https://172.24.207.2]: ").strip()
+        console.print("[yellow]Enter APIC connection details:[/yellow]")
+        apic_ip = Prompt.ask("APIC IP/hostname", default="https://172.24.207.2")
         if not apic_ip:
             apic_ip = "https://172.24.207.2"
         if not apic_ip.startswith("https://"):
             apic_ip = f"https://{apic_ip}"
             
-        username = input("Username [admin]: ").strip() or "admin"
+        username = Prompt.ask("Username", default="admin")
+        if not username:
+            username = "admin"
+            
         password = getpass.getpass("Password: ")
 
     # Create session
@@ -92,20 +112,22 @@ def login_to_apic():
     }
     
     try:
-        logger.info(f"Logging in to {apic_ip}...")
-        response = session.post(login_url, json=payload, timeout=10)
-        response.raise_for_status()
-        token = response.json()['imdata'][0]['aaaLogin']['attributes']['token']
-        session.headers.update({'APIC-Cookie': token})
-        logger.info("Login successful!")
+        with console.status(f"[bold green]Logging in to {apic_ip}...[/bold green]", spinner="dots"):
+            response = session.post(login_url, json=payload, timeout=10)
+            response.raise_for_status()
+            token = response.json()['imdata'][0]['aaaLogin']['attributes']['token']
+            session.headers.update({'APIC-Cookie': token})
+            
+        console.print("[bold green]Login successful![/bold green]")
         return session, apic_ip
     except Exception as e:
-        logger.error(f"Login failed: {e}")
-        input("Press Enter to continue...")
+        console.print(f"[bold red]Login failed:[/bold red] {e}")
+        console.input("[dim]Press Enter to continue...[/dim]")
         return None, None
 
-def run_aci_collector(session, apic_url):
-    logger.info("\nStarting ACI Endpoint Collector...")
+def run_aci_collector(session: requests.Session, apic_url: str) -> None:
+
+    console.print("\n[bold cyan]Starting ACI Endpoint Collector...[/bold cyan]")
     try:
         # Change directory to ensure output files go to the right place
         cwd = os.getcwd()
@@ -118,11 +140,13 @@ def run_aci_collector(session, apic_url):
         os.chdir(cwd)
     except Exception as e:
         logger.error(f"Error running collector: {e}", exc_info=True)
+        console.print(f"[bold red]Error running collector:[/bold red] {e}")
     
-    input("\nPress Enter to return to menu...")
+    console.input("\n[dim]Press Enter to return to menu...[/dim]")
 
-def run_interface_summary(session, apic_url):
-    logger.info("\nStarting ACI Interface Summary...")
+def run_interface_summary(session: requests.Session, apic_url: str) -> None:
+
+    console.print("\n[bold cyan]Starting ACI Interface Summary...[/bold cyan]")
     try:
         cwd = os.getcwd()
         target_dir = os.path.join(PROJECT_ROOT, "ACI Inventory Interface")
@@ -133,11 +157,13 @@ def run_interface_summary(session, apic_url):
         os.chdir(cwd)
     except Exception as e:
         logger.error(f"Error running interface summary: {e}", exc_info=True)
+        console.print(f"[bold red]Error running interface summary:[/bold red] {e}")
     
-    input("\nPress Enter to return to menu...")
+    console.input("\n[dim]Press Enter to return to menu...[/dim]")
 
-def run_epg_discovery(session, apic_url):
-    logger.info("\nStarting ACI EPG Discovery...")
+def run_epg_discovery(session: requests.Session, apic_url: str) -> None:
+
+    console.print("\n[bold cyan]Starting ACI EPG Discovery...[/bold cyan]")
     try:
         cwd = os.getcwd()
         target_dir = os.path.join(PROJECT_ROOT, "ACI EPG Discovery")
@@ -148,84 +174,100 @@ def run_epg_discovery(session, apic_url):
         os.chdir(cwd)
     except Exception as e:
         logger.error(f"Error running EPG discovery: {e}", exc_info=True)
+        console.print(f"[bold red]Error running EPG discovery:[/bold red] {e}")
     
-    input("\nPress Enter to return to menu...")
+    console.input("\n[dim]Press Enter to return to menu...[/dim]")
 
-def run_backup_manager():
-    logger.info("\nStarting Backup Manager...")
+def run_backup_manager() -> None:
+
+    console.print("\n[bold cyan]Starting Backup Manager...[/bold cyan]")
     try:
         subprocess.run([sys.executable, "backup_manager.py"], check=False)
     except Exception as e:
         logger.error(f"Error running script: {e}", exc_info=True)
+        console.print(f"[bold red]Error running script:[/bold red] {e}")
     
-    input("\nPress Enter to return to menu...")
+    console.input("\n[dim]Press Enter to return to menu...[/dim]")
 
-def run_credential_manager():
-    logger.info("\nStarting Credential Manager...")
+def run_credential_manager() -> None:
+
+    console.print("\n[bold cyan]Starting Credential Manager...[/bold cyan]")
     try:
         subprocess.run([sys.executable, "credential_manager.py"], check=False)
     except Exception as e:
         logger.error(f"Error running script: {e}", exc_info=True)
+        console.print(f"[bold red]Error running script:[/bold red] {e}")
     
-    input("\nPress Enter to return to menu...")
+    console.input("\n[dim]Press Enter to return to menu...[/dim]")
 
-def main():
+def main() -> None:
+
     session = None
     apic_url = None
     
     while True:
-        clear_screen()
         print_header()
         
         if session:
-            logger.info(f"Status: Logged in to {apic_url}")
+            console.print(f"[bold green]Status: Logged in to {apic_url}[/bold green]")
         else:
-            logger.info("Status: Not logged in")
+            console.print("[bold red]Status: Not logged in[/bold red]")
             
-        print("\nAvailable Tools:")
-        print("1. Run ACI Endpoint Collector (Fetch Data & Generate Report)")
-        print("2. Run Backup Manager")
-        print("3. Run ACI Interface Summary")
-        print("4. Run ACI EPG Discovery")
-        print("5. Manage Credentials")
-        print("6. View Patch Notes")
-        print("7. Login / Relogin")
-        print("8. Exit")
+        # Create Menu Table
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("Option", style="cyan", width=8, justify="center")
+        table.add_column("Tool / Action", style="white")
+
+        table.add_row("1", "ACI Endpoint Collector (Fetch Data & Generate Report)")
+        table.add_row("2", "Backup Manager")
+        table.add_row("3", "ACI Interface Summary")
+        table.add_row("4", "ACI EPG Discovery")
+        table.add_row("5", "Manage Credentials")
+        table.add_row("6", "View Patch Notes")
+        table.add_row("7", "Login / Relogin")
+        table.add_row("8", "Exit")
+
+        console.print(table)
         
-        choice = input("\nEnter your choice (1-8): ")
+        choice = Prompt.ask("Enter your choice", choices=["1", "2", "3", "4", "5", "6", "7", "8"], default="1")
         
         if choice == '1':
             if not session:
-                session, apic_url = login_to_apic()
-            if session:
+                console.print("[yellow]Please login first (Option 7)[/yellow]")
+                console.input("[dim]Press Enter to continue...[/dim]")
+            else:
                 run_aci_collector(session, apic_url)
         elif choice == '2':
             run_backup_manager()
         elif choice == '3':
             if not session:
-                session, apic_url = login_to_apic()
-            if session:
+                console.print("[yellow]Please login first (Option 7)[/yellow]")
+                console.input("[dim]Press Enter to continue...[/dim]")
+            else:
                 run_interface_summary(session, apic_url)
         elif choice == '4':
             if not session:
-                session, apic_url = login_to_apic()
-            if session:
+                console.print("[yellow]Please login first (Option 7)[/yellow]")
+                console.input("[dim]Press Enter to continue...[/dim]")
+            else:
                 run_epg_discovery(session, apic_url)
         elif choice == '5':
             run_credential_manager()
         elif choice == '6':
-            view_patch_notes()
+            try:
+                with open("PATCH_NOTES.md", "r") as f:
+                    console.print(Panel(f.read(), title="Patch Notes", border_style="blue"))
+            except FileNotFoundError:
+                console.print("[red]Patch notes not found.[/red]")
+            console.input("\n[dim]Press Enter to return to menu...[/dim]")
         elif choice == '7':
             session, apic_url = login_to_apic()
         elif choice == '8':
-            logger.info("\nGoodbye!")
+            console.print("\n[bold cyan]Goodbye![/bold cyan]")
             sys.exit(0)
-        else:
-            input("\nInvalid choice. Press Enter to try again...")
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\nExiting...")
         sys.exit(0)

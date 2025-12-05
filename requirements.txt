@@ -5,3 +5,5 @@ python-dotenv
 openpyxl
 tabulate
 tqdm
+cryptography
+rich

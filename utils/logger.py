@@ -2,8 +2,9 @@ import logging
 import os
 import sys
 from logging.handlers import RotatingFileHandler
+from typing import Optional
 
-def setup_logger(name=None):
+def setup_logger(name: Optional[str] = None) -> logging.Logger:
     """
     Sets up a logger with console (INFO) and file (DEBUG) handlers.
     

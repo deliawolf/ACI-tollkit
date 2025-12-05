@@ -32,7 +32,8 @@ except ImportError:
     print("Warning: Could not import centralized logger. Using default.")
 
 # Load environment variables
-load_dotenv()
+# load_dotenv() # Removed redundant call, handled by credential_manager or root env
+
 
 # Disable SSL warnings
 urllib3.disable_warnings(InsecureRequestWarning)

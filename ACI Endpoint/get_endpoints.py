@@ -11,7 +11,7 @@ import sys
 import urllib3
 from tqdm import tqdm
 from tqdm import tqdm
-from dotenv import load_dotenv # Added this import as it's used later
+
 
 # Import logger
 try:
@@ -247,28 +247,22 @@ def get_credentials_from_manager():
             sys.path.append(project_root)
         
         import credential_manager
-        
+        # credential_manager loads .env, so we don't need to do it here explicitly
         logger.info("\nChecking for saved profiles...")
         creds = credential_manager.get_profile()
         if creds:
-            return creds[0], creds[1], creds[2]
+            apic_ip, apic_username, apic_password = creds
+    except ImportError:
+        pass # credential_manager not available, fallback to .env
     except Exception as e:
         logger.warning(f"Warning: Could not load from credential manager: {e}")
-    return None, None, None
 
-def main():
-    # Load environment variables
-    load_dotenv()
-    
-    # Try to get credentials
-    apic_ip, apic_username, apic_password = get_credentials_from_manager()
-
-    # Fallback to environment variables
+    # Fallback to environment variables (if credential manager didn't load them or failed)
     if not apic_ip:
+        # Load environment variables if not already loaded by credential_manager
+        load_dotenv() 
         apic_ip = os.getenv('APIC_IP')
-    if not apic_username:
         apic_username = os.getenv('APIC_USERNAME')
-    if not apic_password:
         apic_password = os.getenv('APIC_PASSWORD')
 
     if not all([apic_ip, apic_username, apic_password]):

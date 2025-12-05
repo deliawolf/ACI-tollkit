@@ -1,165 +1,258 @@
 import json
 import os
-import getpass
 import base64
-from tabulate import tabulate
+import getpass
+from cryptography.fernet import Fernet
+from dotenv import load_dotenv
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.prompt import Prompt, Confirm
+from typing import Optional, Tuple, List, Dict, Any
 
-CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config')
-PROFILES_FILE = os.path.join(CONFIG_DIR, 'profiles.json')
+# Initialize Console
+console = Console()
 
-def ensure_config_dir():
+# Load environment variables
+load_dotenv()
+
+# Constants
+CONFIG_DIR = "config"
+PROFILES_FILE = os.path.join(CONFIG_DIR, "profiles.json")
+ENV_FILE = ".env"
+
+def get_or_create_key() -> str:
+
+    """
+    Get the encryption key from .env or generate a new one.
+    Ensures the key is saved to .env for persistence.
+    """
+    key = os.getenv("ACI_ENCRYPTION_KEY")
+    if not key:
+        print("Generating new encryption key...")
+        key = Fernet.generate_key().decode()
+        
+        # Save to .env
+        try:
+            # Read existing .env content
+            env_content = ""
+            if os.path.exists(ENV_FILE):
+                with open(ENV_FILE, "r") as f:
+                    env_content = f.read()
+            
+            # Append key if not present (double check)
+            if "ACI_ENCRYPTION_KEY" not in env_content:
+                with open(ENV_FILE, "a") as f:
+                    if env_content and not env_content.endswith("\n"):
+                        f.write("\n")
+                    f.write(f"ACI_ENCRYPTION_KEY={key}\n")
+                console.print(f"[green]Encryption key saved to {ENV_FILE}[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not save key to .env: {e}[/yellow]")
+            console.print("You will need to re-login next time if the key is lost.")
+    
+    return key
+
+# Initialize Cipher
+try:
+    ENCRYPTION_KEY = get_or_create_key()
+    cipher_suite = Fernet(ENCRYPTION_KEY)
+except Exception as e:
+    console.print(f"[red]Error initializing encryption: {e}[/red]")
+    cipher_suite = None
+
+def encrypt_password(password: str) -> str:
+
+    """Encrypt password using Fernet (AES)"""
+    if not cipher_suite:
+        return base64.b64encode(password.encode()).decode() # Fallback
+    return cipher_suite.encrypt(password.encode()).decode()
+
+def decrypt_password(encrypted_password: str) -> str:
+
+    """
+    Decrypt password. 
+    Handles:
+    1. Fernet Encrypted (New)
+    2. Base64 Encoded (Legacy)
+    3. Plaintext (Fallback)
+    """
+    if not encrypted_password:
+        return ""
+        
+    try:
+        # Try Fernet first
+        if cipher_suite:
+            return cipher_suite.decrypt(encrypted_password.encode()).decode()
+    except Exception:
+        pass # Not Fernet encrypted or wrong key
+
+    try:
+        # Try Base64 (Legacy)
+        return base64.b64decode(encrypted_password).decode()
+    except Exception:
+        pass # Not Base64
+
+    # Return as-is (Plaintext)
+    return encrypted_password
+
+def ensure_config_dir() -> None:
+
+    """Ensure config directory exists"""
     if not os.path.exists(CONFIG_DIR):
-        os.makedirs(CONFIG_DIR)
+        try:
+            os.makedirs(CONFIG_DIR)
+        except OSError as e:
+            print(f"Error creating config directory: {e}")
 
-def load_profiles():
-    ensure_config_dir()
+def load_profiles() -> List[Dict[str, Any]]:
+
+    """Load profiles from JSON file. Returns empty list if file missing."""
     if not os.path.exists(PROFILES_FILE):
-        return {}
+        return []
+    
     try:
         with open(PROFILES_FILE, 'r') as f:
             return json.load(f)
-    except json.JSONDecodeError:
-        return {}
+    except (json.JSONDecodeError, IOError):
+        return []
 
-def encode_password(password):
-    """Obfuscate password using base64"""
-    return base64.b64encode(password.encode()).decode()
+def save_profiles(profiles: List[Dict[str, Any]]) -> bool:
 
-def decode_password(encoded_password):
-    """De-obfuscate password"""
-    try:
-        return base64.b64decode(encoded_password.encode()).decode()
-    except Exception:
-        return encoded_password  # Return as-is if decoding fails (legacy support)
-
-def save_profiles(profiles):
+    """Save profiles to JSON file"""
     ensure_config_dir()
-    # Create a deep copy to avoid modifying the runtime dict if we were caching it
-    # But here we just write to file.
-    # We assume the 'profiles' passed in ALREADY has encoded passwords if they came from load_profiles
-    # BUT if we just added a new one, it might be plain text.
-    # Actually, let's handle encoding at the "add" and "get" boundaries to be cleaner.
-    
-    with open(PROFILES_FILE, 'w') as f:
-        json.dump(profiles, f, indent=4)
+    try:
+        with open(PROFILES_FILE, 'w') as f:
+            json.dump(profiles, f, indent=4)
+        return True
+    except IOError as e:
+        console.print(f"[red]Error saving profiles: {e}[/red]")
+        return False
 
-def add_profile():
-    print("\n--- Add New APIC Profile ---")
-    name = input("Profile Name (e.g., Prod-APIC-1): ").strip()
-    if not name:
-        print("Profile name cannot be empty.")
+def add_profile() -> None:
+
+    """Add a new APIC profile"""
+    console.print(Panel("Add New Profile", style="bold blue"))
+    apic_ip = Prompt.ask("APIC IP/URL")
+    username = Prompt.ask("Username")
+    password = getpass.getpass("Password: ")
+    
+    if not all([apic_ip, username, password]):
+        console.print("[red]Error: All fields are required.[/red]")
         return
 
+    # Normalize URL
+    if not apic_ip.startswith("https://"):
+        apic_ip = f"https://{apic_ip}"
+
     profiles = load_profiles()
-    if name in profiles:
-        overwrite = input(f"Profile '{name}' already exists. Overwrite? (y/n): ").lower()
-        if overwrite != 'y':
+    
+    # Check for duplicate
+    for p in profiles:
+        if p['apic_ip'] == apic_ip and p['username'] == username:
+            if Confirm.ask("Profile already exists. Update password?"):
+                p['password'] = encrypt_password(password)
+                save_profiles(profiles)
+                console.print("[green]Profile updated.[/green]")
             return
 
-    ip = input("APIC IP/URL (e.g., https://10.1.1.1): ").strip()
-    # Ensure URL starts with https://
-    if ip and not ip.startswith("https://"):
-        ip = f"https://{ip}"
-        
-    username = input("Username: ").strip()
-    password = getpass.getpass("Password: ")
+    # Add new
+    profiles.append({
+        "apic_ip": apic_ip,
+        "username": username,
+        "password": encrypt_password(password)
+    })
+    
+    if save_profiles(profiles):
+        console.print("[bold green]Profile added successfully.[/bold green]")
 
-    profiles[name] = {
-        'ip': ip,
-        'username': username,
-        'password': encode_password(password)  # Store encoded
-    }
-    save_profiles(profiles)
-    print(f"Profile '{name}' saved successfully.")
+def list_profiles() -> None:
 
-def list_profiles():
+    """List all saved profiles"""
     profiles = load_profiles()
     if not profiles:
-        print("\nNo profiles found.")
+        console.print("[yellow]No profiles found.[/yellow]")
         return
 
-    table_data = []
-    for name, data in profiles.items():
-        table_data.append([name, data.get('ip'), data.get('username')])
-    
-    print("\n--- Saved Profiles ---")
-    print(tabulate(table_data, headers=["Profile Name", "APIC URL", "Username"], tablefmt="pretty"))
+    table = Table(title="Saved Profiles")
+    table.add_column("Index", justify="center", style="cyan")
+    table.add_column("APIC URL", style="white")
+    table.add_column("Username", style="green")
 
-def get_profile():
-    """
-    Interactive prompt to select a profile.
-    Returns: (ip, username, password) or None
-    """
+    for i, p in enumerate(profiles, 1):
+        table.add_row(str(i), p['apic_ip'], p['username'])
+    
+    console.print(table)
+
+def get_profile() -> Optional[Tuple[str, str, str]]:
+
+    """Select a profile and return credentials"""
     profiles = load_profiles()
     if not profiles:
-        print("\nNo profiles found. Please add a profile first.")
-        if input("Do you want to add a profile now? (y/n): ").lower() == 'y':
-            add_profile()
-            profiles = load_profiles() # Reload after adding
-            if not profiles:
-                return None
-        else:
-            return None
+        return None
 
-    print("\n--- Select APIC Profile ---")
-    profile_names = list(profiles.keys())
-    for i, name in enumerate(profile_names, 1):
-        print(f"{i}. {name} ({profiles[name].get('ip')})")
-    
-    print(f"{len(profile_names) + 1}. Enter Credentials Manually")
-
-    while True:
-        try:
-            choice = input(f"\nEnter choice (1-{len(profile_names) + 1}): ")
-            choice_idx = int(choice) - 1
-            
-            if 0 <= choice_idx < len(profile_names):
-                selected_name = profile_names[choice_idx]
-                data = profiles[selected_name]
-                # Decode password before returning
-                decoded_pw = decode_password(data['password'])
-                return data['ip'], data['username'], decoded_pw
-            elif choice_idx == len(profile_names):
-                # Manual entry
-                return None
-            else:
-                print("Invalid choice.")
-        except ValueError:
-            print("Please enter a number.")
-
-def delete_profile():
-    profiles = load_profiles()
-    if not profiles:
-        print("\nNo profiles found.")
-        return
-
-    print("\n--- Delete Profile ---")
-    profile_names = list(profiles.keys())
-    for i, name in enumerate(profile_names, 1):
-        print(f"{i}. {name}")
+    list_profiles()
     
     try:
-        choice = int(input(f"\nSelect profile to delete (1-{len(profile_names)}): "))
-        if 1 <= choice <= len(profile_names):
-            name_to_delete = profile_names[choice-1]
-            if input(f"Are you sure you want to delete '{name_to_delete}'? (y/n): ").lower() == 'y':
-                del profiles[name_to_delete]
-                save_profiles(profiles)
-                print(f"Profile '{name_to_delete}' deleted.")
+        choice = Prompt.ask("Select Profile (Index)", default="")
+        if not choice:
+            return None
+            
+        idx = int(choice) - 1
+        if 0 <= idx < len(profiles):
+            p = profiles[idx]
+            # Decrypt password on retrieval
+            return p['apic_ip'], p['username'], decrypt_password(p['password'])
         else:
-            print("Invalid choice.")
+            console.print("[red]Invalid choice.[/red]")
     except ValueError:
-        print("Invalid input.")
+        console.print("[red]Invalid input.[/red]")
+    
+    return None
+
+def delete_profile() -> None:
+
+    """Delete a profile"""
+    profiles = load_profiles()
+    if not profiles:
+        console.print("[yellow]No profiles found.[/yellow]")
+        return
+
+    list_profiles()
+    
+    try:
+        choice = Prompt.ask("Select Profile to Delete (Index)", default="")
+        if not choice:
+            return
+
+        idx = int(choice) - 1
+        if 0 <= idx < len(profiles):
+            removed = profiles.pop(idx)
+            save_profiles(profiles)
+            console.print(f"[green]Removed profile for {removed['apic_ip']}[/green]")
+        else:
+            console.print("[red]Invalid choice.[/red]")
+    except ValueError:
+        console.print("[red]Invalid input.[/red]")
 
 if __name__ == "__main__":
-    # Simple menu for testing
     while True:
-        print("\n1. List Profiles")
-        print("2. Add Profile")
-        print("3. Delete Profile")
-        print("4. Exit")
-        c = input("Choice: ")
-        if c == '1': list_profiles()
-        elif c == '2': add_profile()
-        elif c == '3': delete_profile()
-        elif c == '4': break
+        console.print("\n[bold cyan]--- Credential Manager ---[/bold cyan]")
+        
+        table = Table(show_header=False, box=None)
+        table.add_row("1. Add/Update Profile")
+        table.add_row("2. List Profiles")
+        table.add_row("3. Delete Profile")
+        table.add_row("4. Exit")
+        console.print(table)
+        
+        choice = Prompt.ask("Enter choice", choices=["1", "2", "3", "4"])
+        
+        if choice == '1':
+            add_profile()
+        elif choice == '2':
+            list_profiles()
+        elif choice == '3':
+            delete_profile()
+        elif choice == '4':
+            break
