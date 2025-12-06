@@ -69,23 +69,26 @@ def fetch_bulk_data(session, base_url):
     static_paths = {}
     vmm_domains = {}
 
-    # 1. Fetch All EPG Deployments (l1EthIfToEPg)
-    # Replaced pconsResourceCtx with l1EthIfToEPg as it is the direct mapping class.
-    logger.info("  Bulk Fetching 1/3: EPG Deployments (l1EthIfToEPg)...")
-    url = f"{base_url}/api/node/class/l1EthIfToEPg.json"
+    # 1. Fetch All EPG Deployments (pconsResourceCtx) - For Dynamic/Deployed State
+    logger.info("  Bulk Fetching 1/3: EPG Deployments (pconsResourceCtx)...")
+    url = f"{base_url}/api/node/class/pconsResourceCtx.json" # Removed filter to be safe
     try:
         response = session.get(url, timeout=120)
         response.raise_for_status()
         data = response.json()
         
         for item in data.get('imdata', []):
-            if 'l1EthIfToEPg' in item:
-                attr = item['l1EthIfToEPg']['attributes']
+            if 'pconsResourceCtx' in item:
+                attr = item['pconsResourceCtx']['attributes']
                 dn = attr.get('dn')
-                epg_dn = attr.get('tDn') # Target DN is the EPG
+                epg_dn = attr.get('ctxDn')
                 
+                # Verify usage is EPG
+                if attr.get('ctxClass') != 'fvAEPg':
+                    continue
+
                 # Extract Node and Interface from DN
-                # Format: topology/pod-1/node-101/sys/phys-[eth1/34]/l1EthIfToEPg...
+                # Format: topology/pod-1/node-101/sys/phys-[eth1/34]/pcons/ctx-[uni/...]
                 match = re.search(r'node-(\d+)/sys/phys-\[(.+?)\]', dn)
                 if match and epg_dn:
                     node = match.group(1)
@@ -94,12 +97,13 @@ def fetch_bulk_data(session, base_url):
                     key = (node, interface)
                     if key not in deployments:
                         deployments[key] = []
-                    deployments[key].append(epg_dn)
+                    if epg_dn not in deployments[key]:
+                        deployments[key].append(epg_dn)
                     
     except Exception as e:
         logger.error(f"Error fetching deployments: {e}")
 
-    # 2. Fetch All Static Paths (fvRsPathAtt)
+    # 2. Fetch All Static Paths (fvRsPathAtt) - For Configured State
     logger.info("  Bulk Fetching 2/3: Static Paths (fvRsPathAtt)...")
     url = f"{base_url}/api/node/class/fvRsPathAtt.json"
     try:
@@ -111,14 +115,44 @@ def fetch_bulk_data(session, base_url):
             if 'fvRsPathAtt' in item:
                 attr = item['fvRsPathAtt']['attributes']
                 epg_dn = re.split(r'/rspathAtt-', attr.get('dn'))[0] # Parent EPG DN
+                tDn = attr.get('tDn')
                 
+                # Store in static_paths map
                 if epg_dn not in static_paths:
                     static_paths[epg_dn] = []
                 
                 static_paths[epg_dn].append({
-                    'tDn': attr.get('tDn'),
+                    'tDn': tDn,
                     'encap': attr.get('encap')
                 })
+                
+                # CRITICAL: Also populate deployments map for Static Paths
+                # This ensures we find the EPG even if pcons query fails or is empty
+                # tDn format: topology/pod-1/paths-101/pathep-[eth1/1]
+                # vPC format: topology/pod-1/protpaths-101-102/pathep-[PolicyGroup]
+                
+                # Check for Single Node Path
+                match = re.search(r'paths-(\d+)/pathep-\[(.+?)\]', tDn)
+                if match:
+                    node = match.group(1)
+                    interface = match.group(2)
+                    
+                    # Normalize interface (remove 'eth' if needed? No, keep as is for now, standard is eth1/1)
+                    if not interface.startswith("eth"):
+                         # Sometimes it's just '1/1', add 'eth'
+                         if re.match(r'\d+/\d+', interface):
+                             interface = f"eth{interface}"
+
+                    key = (node, interface)
+                    if key not in deployments:
+                        deployments[key] = []
+                    if epg_dn not in deployments[key]:
+                        deployments[key].append(epg_dn)
+                
+                # Note: vPC paths (protpaths) are harder to map to a single "Node/Interface" key 
+                # because they map to a logical entity. 
+                # For now, we focus on recovering the Single Node static paths.
+
     except Exception as e:
         logger.error(f"Error fetching static paths: {e}")
 
