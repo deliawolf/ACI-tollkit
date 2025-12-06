@@ -71,18 +71,21 @@ def login_to_apic() -> Tuple[Optional[requests.Session], Optional[str]]:
     """Handle APIC login and return session and URL"""
     console.print("\n[bold blue]--- APIC Login ---[/bold blue]")
     
+    apic_ip = None
+    username = None
+    password = None
+
     # Try to get credentials from manager
     try:
         creds = credential_manager.get_profile()
         if creds:
             apic_ip, username, password = creds
             console.print(f"[green]Using profile for {apic_ip}[/green]")
-        else:
-            # User cancelled or no profile selected
-            pass
     except Exception as e:
         console.print(f"[yellow]Warning: Could not load profiles: {e}[/yellow]")
-        # Manual entry
+
+    # Fallback to Manual entry if no credentials loaded
+    if not apic_ip or not username or not password:
         console.print("[yellow]Enter APIC connection details:[/yellow]")
         apic_ip = Prompt.ask("APIC IP/hostname", default="https://172.24.207.2")
         if not apic_ip:

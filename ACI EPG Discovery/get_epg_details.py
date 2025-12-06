@@ -269,6 +269,20 @@ def run(session, apic_ip, input_file='input_interfaces.xlsx', output_file='outpu
          
     deployments_map, static_paths_map, vmm_domains_map = fetch_bulk_data(session, base_url)
     
+    # DEBUG: Diagnostic Prints
+    print(f"\n[DEBUG] Deployments Found: {len(deployments_map)}")
+    print(f"[DEBUG] Static Paths Found: {len(static_paths_map)}")
+    print(f"[DEBUG] VMM Domains Found: {len(vmm_domains_map)}")
+    
+    if len(deployments_map) > 0:
+        sample_key = list(deployments_map.keys())[0]
+        print(f"[DEBUG] Sample APIC Key: {sample_key} (Type: {type(sample_key[0])}, {type(sample_key[1])})")
+    
+    if not df_input.empty:
+        first_row = df_input.iloc[0]
+        print(f"[DEBUG] Sample Input Row: Node='{first_row['Node']}' Interface='{first_row['Interface']}'")
+        print(f"[DEBUG] Lookup Key would correspond to: ('{str(first_row['Node'])}', '{str(first_row['Interface'])}')")
+    
     logger.info(f"Bulk data loaded. Processing {len(df_input)} interfaces locally...")
 
     all_results = []
