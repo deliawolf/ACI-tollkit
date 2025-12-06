@@ -1,12 +1,11 @@
 import requests
 import pandas as pd
-import xml.etree.ElementTree as ET
+import re
 import urllib3
 import getpass
 import os
 import sys
 import argparse
-import time
 
 # Import logger
 try:
@@ -58,386 +57,263 @@ def login_apic(apic_ip, username, password):
         logger.error(f"Login failed: {e}", exc_info=True)
         return None
 
-def get_epgs_for_interface(session, apic_ip, node, interface, username=None, password=None):
-    """Queries the APIC for EPGs on a specific interface."""
-    # Format interface for URL (e.g., eth1/10 -> eth1/10, but in URL it is usually eth1/10 inside brackets)
-    # The user example: sys/phys-[eth1/43]
-    
-    # Ensure IP doesn't have protocol header as we add it manually
-    base_ip = apic_ip.replace("https://", "").replace("http://", "").rstrip("/")
-    url = f"https://{base_ip}/api/node/mo/topology/pod-1/node-{node}/sys/phys-[{interface}].xml?rsp-subtree-include=full-deployment&target-node=all&target-path=l1EthIfToEPg"
-    
-    try:
-        response = session.get(url, timeout=10)
-        
-        # Handle Token Expiry (403)
-        if response.status_code == 403 and username and password:
-            logger.info("Session expired (403). Attempting to re-authenticate...")
-            new_session = login_apic(apic_ip, username, password)
-            if new_session:
-                # Update existing session with new token
-                session.headers.update(new_session.headers) 
-                
-                # Critical: Clear old cookies and update with new ones to prevent conflict
-                session.cookies.clear()
-                session.cookies.update(new_session.cookies)
-                
-                # Ensure APIC-Cookie is set in cookies as well (APIC often prioritizes cookies)
-                new_token = new_session.headers.get('APIC-Cookie')
-                if new_token:
-                    session.cookies.set('APIC-Cookie', new_token)
-
-                # Retry request
-                logger.info("Re-authentication successful. Retrying request...")
-                response = session.get(url, timeout=10)
-            else:
-                 logger.error("Re-authentication failed.")
-
-        response.raise_for_status()
-        return response.text
-    except Exception as e:
-        logger.error(f"Error querying Node {node} Interface {interface}: {e}")
-        return None
-
-def parse_epgs(xml_content):
-    """Parses the XML content to extract EPG information."""
-    epgs = []
-    try:
-        root = ET.fromstring(xml_content)
-        # Namespace handling might be needed if the XML has namespaces, but the example doesn't show explicit xmlns in the root for the attributes we care about.
-        # We look for pconsResourceCtx with ctxClass="fvAEPg"
-        
-        for pcons in root.findall(".//pconsResourceCtx[@ctxClass='fvAEPg']"):
-            ctx_dn = pcons.get('ctxDn')
-            if ctx_dn:
-                # Example ctxDn: uni/tn-DC-SHARED-SVC/ap-ANP-SERVICES-SHARED-SVC/epg-EPG_172.18.9.0x24
-                parts = ctx_dn.split('/')
-                tenant = ""
-                app_profile = ""
-                epg_name = ""
-                
-                for part in parts:
-                    if part.startswith('tn-'):
-                        tenant = part[3:]
-                    elif part.startswith('ap-'):
-                        app_profile = part[3:]
-                    elif part.startswith('epg-'):
-                        epg_name = part[4:]
-                
-                epgs.append({
-                    'Tenant': tenant,
-                    'AppProfile': app_profile,
-                    'EPG': epg_name,
-                    'DN': ctx_dn
-                })
-    except Exception as e:
-        logger.error(f"Error parsing XML: {e}", exc_info=True)
-    return epgs
-
-
-
-def get_epg_vlan(session, apic_ip, epg_dn, node, interface, username=None, password=None):
+def fetch_bulk_data(session, base_url):
     """
-    Queries the EPG for its fvRsPathAtt children and finds the VLAN for the given node/interface.
-    Returns (vlan, path_type, path_dn, domains_str)
+    Fetches all necessary data in 3 bulk API calls.
+    Returns:
+    - deployments: Dict {(node, interface): [epg_dn, ...]}
+    - static_paths: Dict {epg_dn: [{tDn, encap}, ...]}
+    - vmm_domains: Dict {epg_dn: [tDn, ...]}
     """
-    # Query for both static paths (fvRsPathAtt) and VMM domains (fvRsDomAtt) using JSON
-    # Explicitly ask for these classes and increase page size to ensure we get all paths
-    
-    base_ip = apic_ip.replace("https://", "").replace("http://", "").rstrip("/")
-    url = f"https://{base_ip}/api/node/mo/{epg_dn}.json?query-target=children&target-subtree-class=fvRsPathAtt,fvRsDomAtt&page-size=10000"
-    
+    deployments = {}
+    static_paths = {}
+    vmm_domains = {}
+
+    # 1. Fetch All EPG Deployments (pconsResourceCtx)
+    logger.info("  Bulk Fetching 1/3: EPG Deployments (pconsResourceCtx)...")
+    url = f"{base_url}/api/node/class/pconsResourceCtx.json?query-target-filter=eq(pconsResourceCtx.ctxClass,\"fvAEPg\")"
     try:
-        response = session.get(url, timeout=10)
-
-        # Handle Token Expiry (403)
-        if response.status_code == 403 and username and password:
-            logger.info("Session expired (403). Attempting to re-authenticate...")
-            new_session = login_apic(apic_ip, username, password)
-            if new_session:
-                # Update existing session with new token
-                session.headers.update(new_session.headers) 
-                
-                # Critical: Clear old cookies and update with new ones to prevent conflict
-                session.cookies.clear()
-                session.cookies.update(new_session.cookies)
-                
-                # Ensure APIC-Cookie is set in cookies as well (APIC often prioritizes cookies)
-                new_token = new_session.headers.get('APIC-Cookie')
-                if new_token:
-                    session.cookies.set('APIC-Cookie', new_token)
-                
-                # Retry request
-                logger.info("Re-authentication successful. Retrying request...")
-                response = session.get(url, timeout=10)
-
+        response = session.get(url, timeout=120) # Increased timeout for bulk
         response.raise_for_status()
         data = response.json()
         
-        # Extract Domains
-        domains = []
-        # JSON structure: {"imdata": [{"fvRsDomAtt": {"attributes": {...}}}, ...]}
         for item in data.get('imdata', []):
-            if 'fvRsDomAtt' in item:
-                t_dn = item['fvRsDomAtt']['attributes'].get('tDn')
-                if t_dn:
-                    parts = t_dn.split('/')
-                    if parts:
-                        last_part = parts[-1]
-                        if '-' in last_part:
-                            domains.append(last_part.split('-', 1)[1])
-                        else:
-                            domains.append(last_part)
-        domains_str = ", ".join(domains)
+            if 'pconsResourceCtx' in item:
+                attr = item['pconsResourceCtx']['attributes']
+                dn = attr.get('dn')
+                epg_dn = attr.get('ctxDn')
+                
+                # Extract Node and Interface from DN
+                # Format: topology/pod-1/node-101/sys/phys-[eth1/34]/pcons/ctx-[uni/...]
+                match = re.search(r'node-(\d+)/sys/phys-\[(.+?)\]', dn)
+                if match and epg_dn:
+                    node = match.group(1)
+                    interface = match.group(2)
+                    
+                    key = (node, interface)
+                    if key not in deployments:
+                        deployments[key] = []
+                    deployments[key].append(epg_dn)
+                    
+    except Exception as e:
+        logger.error(f"Error fetching deployments: {e}")
 
-        # 1. Check for Static Paths (fvRsPathAtt)
-        # Normalize interface: ensure 'eth' prefix, remove 'Ethernet' if present, STRIP whitespace
-        clean_interface = str(interface).strip()
-        norm_interface = clean_interface.replace("Ethernet", "eth")
-        target_direct_suffix = f"pathep-[{norm_interface}]"
+    # 2. Fetch All Static Paths (fvRsPathAtt)
+    logger.info("  Bulk Fetching 2/3: Static Paths (fvRsPathAtt)...")
+    url = f"{base_url}/api/node/class/fvRsPathAtt.json"
+    try:
+        response = session.get(url, timeout=120)
+        response.raise_for_status()
+        data = response.json()
         
-        partial_matches = []
-
         for item in data.get('imdata', []):
             if 'fvRsPathAtt' in item:
-                attrs = item['fvRsPathAtt']['attributes']
-                t_dn = attrs.get('tDn')
-                encap = attrs.get('encap')
+                attr = item['fvRsPathAtt']['attributes']
+                epg_dn = re.split(r'/rspathAtt-', attr.get('dn'))[0] # Parent EPG DN
                 
-                if not t_dn:
-                    continue
+                if epg_dn not in static_paths:
+                    static_paths[epg_dn] = []
                 
-                # Check for Direct Match (or Exact VPC Match if user provided Policy Group name)
-                # We check if the tDn contains the target suffix (pathep-[interface])
-                # AND if the Node ID is correct.
-                
-                if target_direct_suffix in t_dn:
-                    # Check Node for Direct Path
-                    if f"paths-{node}/" in t_dn:
-                        return encap, "Direct", t_dn, domains_str
-                    
-                    # Check Node for VPC Path
-                    if "protpaths-" in t_dn:
-                        try:
-                            parts = t_dn.split('/')
-                            for part in parts:
-                                if part.startswith('protpaths-'):
-                                    nodes_str = part[10:] # 225-226
-                                    vpc_nodes = nodes_str.split('-')
-                                    if str(node) in vpc_nodes:
-                                        return encap, "VPC", t_dn, domains_str
-                        except Exception:
-                            pass
-                
-                # Heuristic VPC Match: Check if Port Number matches
-                # If the user asks for 'eth1/10' and the path is '..._PolGrp_Port10', strict match fails.
-                # We check if the port number (10) appears as a distinct number in the path suffix.
-                if "protpaths-" in t_dn:
-                    try:
-                        # 1. Verify Node ID matches VPC
-                        node_match = False
-                        parts = t_dn.split('/')
-                        for part in parts:
-                            if part.startswith('protpaths-'):
-                                nodes_str = part[10:]
-                                vpc_nodes = nodes_str.split('-')
-                                if str(node) in vpc_nodes:
-                                    node_match = True
-                                    break
-                        
-                        if node_match:
-                            # 2. Extract Port Number from Input
-                            # input: eth1/10 -> 10
-                            import re
-                            port_num = None
-                            match = re.search(r'(\d+)$', clean_interface)
-                            if match:
-                                port_num = match.group(1)
-                            
-                            if port_num:
-                                # 3. Extract all numbers from the Path Suffix (inside pathep-[...])
-                                # tDn: .../pathep-[Leaf-225-226_PolGrp_Port10]
-                                suffix_match = re.search(r'pathep-\[(.*?)\]', t_dn)
-                                if suffix_match:
-                                    suffix_content = suffix_match.group(1)
-                                    # Find all distinct numbers in the suffix
-                                    path_numbers = re.findall(r'\d+', suffix_content)
-                                    
-                                    # 4. Check if port_num is in path_numbers
-                                    # We compare strings: "10" in ["225", "226", "10"] -> True
-                                    if port_num in path_numbers:
-                                        return encap, "VPC", t_dn, domains_str
-                    except Exception:
-                        pass
-                
-                # Check for Partial Match (Interface matches, but Node doesn't)
-                if target_direct_suffix in t_dn:
-                    # Extract the node from the path to show the user
-                    found_node = "Unknown"
-                    if "paths-" in t_dn:
-                        # .../paths-227/...
-                        try:
-                            found_node = t_dn.split('paths-')[1].split('/')[0]
-                        except: pass
-                    elif "protpaths-" in t_dn:
-                        # .../protpaths-225-226/...
-                        try:
-                            found_node = t_dn.split('protpaths-')[1].split('/')[0]
-                        except: pass
-                    
-                    partial_matches.append(f"Node {found_node}")
+                static_paths[epg_dn].append({
+                    'tDn': attr.get('tDn'),
+                    'encap': attr.get('encap')
+                })
+    except Exception as e:
+        logger.error(f"Error fetching static paths: {e}")
 
-        # 2. If no static path matched, check if it's a VMM Domain
-        is_vmm = False
+    # 3. Fetch All VMM Domains (fvRsDomAtt)
+    logger.info("  Bulk Fetching 3/3: VMM Domains (fvRsDomAtt)...")
+    url = f"{base_url}/api/node/class/fvRsDomAtt.json"
+    try:
+        response = session.get(url, timeout=120)
+        response.raise_for_status()
+        data = response.json()
+        
         for item in data.get('imdata', []):
             if 'fvRsDomAtt' in item:
-                t_dn = item['fvRsDomAtt']['attributes'].get('tDn', '')
-                if 'vmmp-' in t_dn:
-                    is_vmm = True
-                    break
-        
-        if is_vmm:
-            # Attempt to resolve Dynamic VLAN via Endpoint Policy (EPP)
-            # Optimized: Query fvIfConn directly under the Node.
-            # This avoids traversing the hierarchy and potential missing children issues.
-            
-            try:
-                # Query fvIfConn directly
-                base_ip = apic_ip.replace("https://", "").replace("http://", "").rstrip("/")
-                conn_url = f"https://{base_ip}/api/node/mo/uni/epp/fv-[{epg_dn}]/node-{node}.json?query-target=subtree&target-subtree-class=fvIfConn"
-
-                conn_resp = session.get(conn_url, timeout=10)
-                conn_resp.raise_for_status()
-                conn_data = conn_resp.json()
+                attr = item['fvRsDomAtt']['attributes']
+                epg_dn = re.split(r'/rsdomAtt-', attr.get('dn'))[0]
                 
-                # Normalize interface for matching (Ethernet -> eth)
-                clean_interface = str(interface).strip()
-                norm_interface = clean_interface.replace("Ethernet", "eth")
-
+                if epg_dn not in vmm_domains:
+                    vmm_domains[epg_dn] = []
                 
-                items = conn_data.get('imdata', [])
-
-                
-                if not items:
-                     return "EPP: No Dynamic Connections", "VMM Domain", "N/A", domains_str
-
-                for item in items:
-                    if 'fvIfConn' in item:
-                        conn_obj = item['fvIfConn']
-                        dn = conn_obj['attributes'].get('dn', '')
-                        
-                        # Check if this fvIfConn is for our interface
-                        # DN format: .../dyatt-[topology/pod-1/paths-215/pathep-[eth1/24]]/conndef/conn-...
-                        
-                        if f"pathep-[{norm_interface}]" in dn:
-
-                             encap = conn_obj['attributes'].get('encap', '')
-                             if encap:
-                                 return encap, "Dynamic (VMM Resolved)", dn, domains_str
-                
-
-                return "EPP: Interface Not Found in Connections", "VMM Domain", "N/A", domains_str
-
-            except Exception as e:
-                logger.debug(f"  Error querying Dynamic VLAN: {e}")
-                return f"EPP Error: {str(e)}", "VMM Domain", "N/A", domains_str
-
-        # 3. If neither, check if we had partial matches
-        if partial_matches:
-            unique_partials = list(set(partial_matches))
-            return "Not Found (Node Mismatch)", "Partial Match", f"Found on: {', '.join(unique_partials)}", domains_str
-
-        return "Not Found", "None", "No matching path", domains_str
-
+                vmm_domains[epg_dn].append(attr.get('tDn'))
     except Exception as e:
-        logger.error(f"Error querying VLAN for {epg_dn}: {e}")
-        return "Error", "Error", str(e), ""
+        logger.error(f"Error fetching VMM domains: {e}")
 
-def get_credentials():
-    """Get credentials from manager or environment"""
-    # Try credential manager first
-    if credential_manager:
-        logger.info("\nChecking for saved profiles...")
-        creds = credential_manager.get_profile()
-        if creds:
-            return creds[0], creds[1], creds[2]
+    return deployments, static_paths, vmm_domains
 
-    # Fallback to manual input
-    logger.info("\nEnter APIC connection details:")
-    apic_ip = input("APIC IP/hostname: ").strip()
-    username = input("Username: ").strip()
-    password = getpass.getpass("Password: ")
+def resolve_vlan_details(epg_dn, node, interface, static_paths_map, vmm_domains_map):
+    """Local matching logic to find VLAN/PathType from pre-fetched data."""
+    vlan = "Not Found"
+    path_type = "None"
+    path_dn_found = "N/A"
+    domains_str = ""
     
-    if apic_ip and not apic_ip.startswith("https://"):
-        apic_ip = f"https://{apic_ip}"
+    # Get Domains
+    domains = vmm_domains_map.get(epg_dn, [])
+    if domains:
+        # Extract domain names from tDn (e.g., uni/vmmp-VMware/dom-vCenter -> vCenter)
+        clean_domains = []
+        for d_dn in domains:
+            parts = d_dn.split('/')
+            if parts:
+                last_part = parts[-1]
+                if '-' in last_part:
+                    clean_domains.append(last_part.split('-', 1)[1])
+                else:
+                    clean_domains.append(last_part)
+        domains_str = ", ".join(clean_domains)
+        path_type = "VMM Domain" # Default if dynamic
         
-    return apic_ip, username, password
+    # Check Static Paths matches
+    # Interface format from Excel: "eth1/1"
+    # Static Path tDn formats:
+    # - topology/pod-1/paths-101/pathep-[eth1/1] (Single Leaf)
+    # - topology/pod-1/protpaths-101-102/pathep-[name] (vPC)
+    
+    paths = static_paths_map.get(epg_dn, [])
+    
+    # Normalize interface for matching (Ethernet -> eth)
+    clean_interface = str(interface).strip()
+    norm_interface = clean_interface.replace("Ethernet", "eth")
+
+    for path in paths:
+        tDn = path['tDn']
+        encap = path['encap']
+        
+        # Check Direct Match (Single Node)
+        # paths-101 ... pathep-[eth1/1]
+        if f"paths-{node}/pathep-[{norm_interface}]" in tDn:
+            return encap, "Static Path", tDn, domains_str
+
+        # Check vPC Match
+        # protpaths-101-102 ...
+        # We need to check if the node is part of the vPC and if the interface matches
+        if "protpaths-" in tDn:
+            try:
+                # 1. Verify Node ID matches VPC
+                node_match = False
+                parts = tDn.split('/')
+                for part in parts:
+                    if part.startswith('protpaths-'):
+                        nodes_str = part[10:] # e.g., "101-102"
+                        vpc_nodes = nodes_str.split('-')
+                        if str(node) in vpc_nodes:
+                            node_match = True
+                            break
+                
+                if node_match:
+                    # 2. Extract Port Number from Input
+                    port_num = None
+                    match = re.search(r'(\d+)$', norm_interface)
+                    if match:
+                        port_num = match.group(1)
+                    
+                    if port_num:
+                        # 3. Extract all numbers from the Path Suffix (inside pathep-[...])
+                        suffix_match = re.search(r'pathep-\[(.*?)\]', tDn)
+                        if suffix_match:
+                            suffix_content = suffix_match.group(1)
+                            path_numbers = re.findall(r'\d+', suffix_content)
+                            
+                            # 4. Check if port_num is in path_numbers
+                            if port_num in path_numbers:
+                                return encap, "VPC", tDn, domains_str
+            except Exception:
+                pass # Continue to next path if parsing fails
+
+    # If no static match, and we have domains
+    if domains:
+        return "Dynamic (VMM)", "VMM Domain", "N/A", domains_str
+
+    return vlan, path_type, path_dn_found, domains_str
+
+def parse_epg_name(epg_dn):
+    """Extract Tenant, AppProfile, EPG from DN."""
+    # DN: uni/tn-Tenant/ap-Profile/epg-Name
+    parts = epg_dn.split('/')
+    tenant = ""
+    app_profile = ""
+    epg_name = ""
+    
+    for part in parts:
+        if part.startswith('tn-'):
+            tenant = part[3:]
+        elif part.startswith('ap-'):
+            app_profile = part[3:]
+        elif part.startswith('epg-'):
+            epg_name = part[4:]
+            
+    return tenant, app_profile, epg_name
 
 def run(session, apic_ip, input_file='input_interfaces.xlsx', output_file='output_epgs.xlsx', username=None, password=None):
     """Entry point for main.py"""
     
-    # Read input
+    # Load Input
     try:
-        # Handle relative paths if run from main.py
         if not os.path.exists(input_file):
-            # Try looking in the script directory
             script_dir = os.path.dirname(os.path.abspath(__file__))
             input_file = os.path.join(script_dir, os.path.basename(input_file))
-            
         df_input = pd.read_excel(input_file)
     except FileNotFoundError:
         logger.error(f"Error: {input_file} not found.")
         return
 
+    # Bulk Fetch
+    print("Fetching bulk data from APIC (this may take a moment)...")
+    base_url = apic_ip.rstrip('/')
+    # Handle full URL if passed
+    if not base_url.startswith("http"):
+         base_url = f"https://{base_url}"
+         
+    deployments_map, static_paths_map, vmm_domains_map = fetch_bulk_data(session, base_url)
+    
+    logger.info(f"Bulk data loaded. Processing {len(df_input)} interfaces locally...")
+
     all_results = []
 
-    print(f"Processing {len(df_input)} interfaces...")
-    
-    for index, row in df_input.iterrows():
-        node = row['Node']
-        interface = row['Interface']
+    # Process Locally
+    from tqdm import tqdm # Import tqdm here as it's only used in run
+    for index, row in tqdm(df_input.iterrows(), total=len(df_input), unit="iface"):
+        node = str(row['Node'])
+        interface = str(row['Interface'])
         
-        logger.info(f"Checking Node {node} Interface {interface}...")
+        epg_dns = deployments_map.get((node, interface), [])
         
-        xml_content = get_epgs_for_interface(session, apic_ip, node, interface, username, password)
-        
-        if xml_content:
-            epgs = parse_epgs(xml_content)
-            if epgs:
-                logger.info(f"  Found {len(epgs)} EPGs. Querying Path Details...")
-                for epg in epgs:
-                    epg['Node'] = node
-                    epg['Interface'] = interface
-                    
-                    # Query Path Details (VLAN, Type, DN)
-                    vlan, path_type, path_dn, domains = get_epg_vlan(session, apic_ip, epg['DN'], node, interface, username, password)
-                    epg['VLAN'] = vlan
-                    epg['PathType'] = path_type
-                    epg['PathDN'] = path_dn
-                    epg['Domains'] = domains
-                    
-                    all_results.append(epg)
-            else:
-                logger.info(f"  No EPGs found or parsing error.")
-        
-        # Rate limiting to be safe
-        time.sleep(0.1)
+        if epg_dns:
+            for epg_dn in epg_dns:
+                tenant, app_profile, epg = parse_epg_name(epg_dn)
+                vlan, path_type, path_dn, domains = resolve_vlan_details(epg_dn, node, interface, static_paths_map, vmm_domains_map)
+                
+                all_results.append({
+                    'Node': node,
+                    'Interface': interface,
+                    'Tenant': tenant,
+                    'AppProfile': app_profile,
+                    'EPG': epg,
+                    'VLAN': vlan,
+                    'PathType': path_type,
+                    'PathDN': path_dn,
+                    'Domains': domains,
+                    'DN': epg_dn
+                })
+        # else:
+            # No EPGs found for this interface, no need to add to results if nothing found.
+            # If user wants to see interfaces with no EPGs, this logic would need to change.
 
-    # Save results
+    # Save Results
     if all_results:
         df_output = pd.DataFrame(all_results)
-        # Reorder columns - Added PathType and PathDN as requested
         cols = ['Node', 'Interface', 'Tenant', 'AppProfile', 'EPG', 'VLAN', 'PathType', 'PathDN', 'Domains']
-        # Ensure all columns exist
         for col in cols:
             if col not in df_output.columns:
                 df_output[col] = ""
-                
         df_output = df_output[cols]
         df_output.to_excel(output_file, index=False)
-        logger.info(f"Results saved to {output_file}")
+        logger.info(f"\nResults saved to {output_file}")
     else:
-        logger.info("No results to save.")
+        logger.info("\nNo EPGs found for any of the provided interfaces.")
 
 def main():
     parser = argparse.ArgumentParser(description='ACI EPG Discovery Tool')
