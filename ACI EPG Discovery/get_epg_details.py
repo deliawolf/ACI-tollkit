@@ -69,22 +69,23 @@ def fetch_bulk_data(session, base_url):
     static_paths = {}
     vmm_domains = {}
 
-    # 1. Fetch All EPG Deployments (pconsResourceCtx)
-    logger.info("  Bulk Fetching 1/3: EPG Deployments (pconsResourceCtx)...")
-    url = f"{base_url}/api/node/class/pconsResourceCtx.json?query-target-filter=eq(pconsResourceCtx.ctxClass,\"fvAEPg\")"
+    # 1. Fetch All EPG Deployments (l1EthIfToEPg)
+    # Replaced pconsResourceCtx with l1EthIfToEPg as it is the direct mapping class.
+    logger.info("  Bulk Fetching 1/3: EPG Deployments (l1EthIfToEPg)...")
+    url = f"{base_url}/api/node/class/l1EthIfToEPg.json"
     try:
-        response = session.get(url, timeout=120) # Increased timeout for bulk
+        response = session.get(url, timeout=120)
         response.raise_for_status()
         data = response.json()
         
         for item in data.get('imdata', []):
-            if 'pconsResourceCtx' in item:
-                attr = item['pconsResourceCtx']['attributes']
+            if 'l1EthIfToEPg' in item:
+                attr = item['l1EthIfToEPg']['attributes']
                 dn = attr.get('dn')
-                epg_dn = attr.get('ctxDn')
+                epg_dn = attr.get('tDn') # Target DN is the EPG
                 
                 # Extract Node and Interface from DN
-                # Format: topology/pod-1/node-101/sys/phys-[eth1/34]/pcons/ctx-[uni/...]
+                # Format: topology/pod-1/node-101/sys/phys-[eth1/34]/l1EthIfToEPg...
                 match = re.search(r'node-(\d+)/sys/phys-\[(.+?)\]', dn)
                 if match and epg_dn:
                     node = match.group(1)
