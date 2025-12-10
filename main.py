@@ -162,7 +162,7 @@ def run_interface_summary(session: requests.Session, apic_url: str, username: st
     console.input("\n[dim]Press Enter to return to menu...[/dim]")
 
 def run_epg_discovery(session: requests.Session, apic_url: str, username: str, password: str) -> None:
-    console.print("\n[bold cyan]Starting ACI EPG Discovery...[/bold cyan]")
+    console.print("\n[bold cyan]Starting ACI Static path (Physical)...[/bold cyan]")
     try:
         cwd = os.getcwd()
         target_dir = os.path.join(PROJECT_ROOT, "ACI EPG Discovery")
@@ -218,12 +218,12 @@ def main() -> None:
         if session:
             table.add_row("2", "[bold cyan]ACI Endpoint Collector[/bold cyan] [dim](Fetch Data & Generate Report)[/dim]")
             table.add_row("3", "[bold blue]ACI Interface Summary[/bold blue]")
-            table.add_row("4", "[bold magenta]ACI EPG Discovery[/bold magenta]")
+            table.add_row("4", "[bold magenta]ACI Static path (Physical)[/bold magenta]")
         else:
             # Dimmed state
             table.add_row("2", "[dim]ACI Endpoint Collector (Fetch Data & Generate Report)[/dim]")
             table.add_row("3", "[dim]ACI Interface Summary[/dim]")
-            table.add_row("4", "[dim]ACI EPG Discovery[/dim]")
+            table.add_row("4", "[dim]ACI Static path (Physical)[/dim]")
         
         table.add_section()
 
